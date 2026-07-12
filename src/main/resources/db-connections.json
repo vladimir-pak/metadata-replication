@@ -1,0 +1,13 @@
+[
+    {
+      "name": "postgres_server",
+      "service_name": "postgres_server",
+      "db_type": "postgres",
+      "url": "jdbc:postgresql://localhost:5432/source_db_1",
+      "username": "postgres",
+      "password": "kampus",
+      "schema": "public",
+      "priority": 1,
+      "active": true
+    }
+  ]
