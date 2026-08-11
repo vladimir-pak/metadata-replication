@@ -5,6 +5,7 @@ import org.springframework.boot.autoconfigure.jdbc.DataSourceProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import javax.sql.DataSource;
@@ -12,7 +13,9 @@ import javax.sql.DataSource;
 @Configuration
 @AllArgsConstructor
 public class DatabaseConfig {
+
     private final DataSourceProperties dataSourceProperties;
+
     @Bean
     @Primary
     public DataSource mainDataSource() {
@@ -22,5 +25,15 @@ public class DatabaseConfig {
         dataSource.setUsername(dataSourceProperties.getUsername());
         dataSource.setPassword(dataSourceProperties.getPassword());
         return dataSource;
+    }
+
+    public DataSourceProperties getDbProperties() {
+        return dataSourceProperties;
+    }
+
+    @Bean(name = "dataSource")
+    @Primary
+    public JdbcTemplate jdbcTemplate(DataSource dataSource) {
+        return new JdbcTemplate(dataSource);
     }
 }

@@ -12,6 +12,7 @@ import com.gpb.replication.postgres.model.SchemaMetadata;
 import com.gpb.replication.postgres.model.TableMetadata;
 import com.gpb.replication.postgres.properties.SqlTemplates;
 import com.gpb.replication.postgres.repository.DatabaseMetadataRepository;
+import com.gpb.replication.postgres.repository.ExcludePatternsRepository;
 import com.gpb.replication.postgres.repository.SchemaMetadataRepository;
 import com.gpb.replication.postgres.repository.TableMetadataRepository;
 import com.gpb.replication.postgres.service.DbSourcesService;
@@ -34,10 +35,10 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
-@Service
+@Service("postgresReplicationService")
 @RequiredArgsConstructor
 @Slf4j
-public class ReplicationServiceImpl implements ReplicationService {
+public class PostgresReplicationServiceImpl implements ReplicationService {
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     private final DbSourcesService dbSourcesService;
@@ -47,6 +48,10 @@ public class ReplicationServiceImpl implements ReplicationService {
     private final TableMetadataRepository tableRep;
     private final VaultSecretService vault;
     private final SqlTemplates sql;
+
+    private final static String DB_SCHEMA_NAME = "postgres_metadata";
+
+    private final ExcludePatternsRepository excludeRepository;
 
     @Async
     public void startReplicationAsync(String serviceName) {
@@ -114,23 +119,19 @@ public class ReplicationServiceImpl implements ReplicationService {
                     e
             );
 
-            log.error("Ошибка при подключении к источнику {}", source.getName(), e);
             throw new RuntimeException("Ошибка при подключении к источнику: " + source.getName(), e);
         }
     }
 
     private void truncateTables(String serviceName) {
-        svoiCustomLogger.sendInternal(
-                "replicationDataReset",
-                "replication Data Reset",
-                "serviceName=" + serviceName,
-                SvoiSeverityEnum.ONE
+        databaseRep.deleteByServiceName(DB_SCHEMA_NAME, serviceName);
+        schemaRep.deleteByServiceName(DB_SCHEMA_NAME, serviceName);
+        tableRep.deleteByServiceName(DB_SCHEMA_NAME, serviceName);
+        log.info(
+                "Truncated metadata tables. db={}; service={}", 
+                DB_SCHEMA_NAME, 
+                serviceName
         );
-
-        databaseRep.deleteByServiceName(serviceName);
-        schemaRep.deleteByServiceName(serviceName);
-        tableRep.deleteByServiceName(serviceName);
-        log.info("Truncated metadata tables for service={}", serviceName);
     }
 
     private List<String> databaseReplication(SourceDbConnections source) throws SQLException {
@@ -156,7 +157,6 @@ public class ReplicationServiceImpl implements ReplicationService {
                 db.setCreatedAt(currentTime);
                 db.setHashData(DigestUtils.md5Hex(fqn));
 
-
                 entities.add(db);
                 databases.add(dbName);
             }
@@ -181,8 +181,17 @@ public class ReplicationServiceImpl implements ReplicationService {
              PreparedStatement stmt = conn.prepareStatement(sql.getSchemaSql());
              ResultSet rs = stmt.executeQuery()) {
 
+            List<String> excludeSchemaPatterns = excludeRepository.getSchemaPatterns();
+
             while (rs.next()) {
+                
                 String schemaName = rs.getString("schema_name");
+                /*
+                * Если схема попадает под exclude не добавляем в snapshot
+                */
+                if (isExcluded(schemaName, excludeSchemaPatterns)) {
+                    continue;
+                }
                 long oid = rs.getLong("oid");
                 String fqn = getFqn(List.of(source.getServiceName(), dbName, schemaName));
                 String parentFqn = fqn.substring(0, fqn.lastIndexOf("."));
@@ -216,6 +225,8 @@ public class ReplicationServiceImpl implements ReplicationService {
              ResultSet rs = stmt.executeQuery()) {
 
             List<TableMetadata> entities = new ArrayList<>();
+            List<String> excludeSchemaPatterns = excludeRepository.getSchemaPatterns();
+            List<String> excludeTablesPatterns = excludeRepository.getTablePatterns();
 
             while (rs.next()) {
                 try {
@@ -224,12 +235,22 @@ public class ReplicationServiceImpl implements ReplicationService {
                     String parentFqn = fqn.substring(0, fqn.lastIndexOf("."));
                     EntityId id = new EntityId(rs.getLong("oid"), parentFqn);
 
+                    String schemaName = rs.getString("schema_name");
+                    String tableName = rs.getString("table_name");
+                    /*
+                    * Если схема или таблица попадает под exclude не добавляем в snapshot
+                    */
+                    if (isExcluded(schemaName, excludeSchemaPatterns) || 
+                            isExcluded(tableName, excludeTablesPatterns)) {
+                        continue;
+                    }
+
                     table.setId(id);
                     table.setFqn(fqn);
                     table.setDbName(dbName);
-                    table.setSchemaName(rs.getString("schema_name"));
+                    table.setSchemaName(schemaName);
                     table.setDescription(rs.getString("description"));
-                    table.setName(rs.getString("table_name"));
+                    table.setName(tableName);
                     table.setServiceName(source.getServiceName());
                     table.setCreatedAt(currentTime);
 
@@ -268,5 +289,15 @@ public class ReplicationServiceImpl implements ReplicationService {
             url = url.replaceFirst("/[^/]+$", "/" + dbName);
         }
         return url;
+    }
+
+    private boolean isExcluded(String name, List<String> excludePatterns) {
+        if (name == null || excludePatterns == null || excludePatterns.isEmpty()) {
+            return false;
+        }
+
+        return excludePatterns.stream()
+                .filter(pattern -> pattern != null && !pattern.isBlank())
+                .anyMatch(pattern -> name.matches(pattern));
     }
 }

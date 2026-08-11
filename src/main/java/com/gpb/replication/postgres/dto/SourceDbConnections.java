@@ -7,6 +7,9 @@ import lombok.Setter;
 
 import java.io.Serializable;
 import java.net.URI;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -59,4 +62,10 @@ public class SourceDbConnections implements Serializable {
         }
     }
 
+    public Connection getConnection() throws SQLException {
+        return DriverManager.getConnection(
+                getUrl(),
+                getUsername(),
+                getPassword());
+    }
 }

@@ -13,6 +13,6 @@ import jakarta.transaction.Transactional;
 public interface DatabaseMetadataRepository extends JpaRepository<DatabaseMetadata, EntityId> {
     @Modifying
     @Transactional
-    @Query(value = "DELETE FROM postgres_metadata.database_metadata WHERE service_name = :service", nativeQuery = true)
-    void deleteByServiceName(@Param("service") String service);
+    @Query(value = "DELETE FROM :schema.database_metadata WHERE service_name = :service", nativeQuery = true)
+    void deleteByServiceName(@Param("schema") String schema, @Param("service") String service);
 }
