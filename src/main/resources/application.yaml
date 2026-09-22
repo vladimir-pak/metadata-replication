@@ -33,14 +33,6 @@ spring:
       max-lifetime: 1800000
       pool-name: TargetDBPool
 
-  jpa:
-    hibernate:
-      ddl-auto: none
-    show-sql: true
-    properties:
-      hibernate:
-        default_schema: postgres_metadata
-
   flyway:
     schemas: postgres_metadata
     enabled: true
@@ -75,6 +67,10 @@ spring:
       connection-timeout: 5000
       read-timeout: 15000
 
+jwt:
+  secret: s356tgsf2u4tyuyg
+  expirationHours: 24000
+
 logs-database:
   enabled: true
   task-create-partition: 0 0 0 * * ?
@@ -105,16 +101,38 @@ management:
 
 sources:
   connections:
+    provide: vault # ALLOWED: vault | file
     file-path: ${CONFIG_DIR:classpath:db-connections.json}
+
+replication:
+  oracle:
+    fetch-size: 5000
+  postgres:
+    fetch-size: 5000
+  mssql:
+    fetch-size: 5000
+  sapiq:
+    fetch-size: 5000
 
 logging:
   cef:
-    path: logs/cef
-    retention-days: 30
+    path: logs
+    fileName: cef.log
+    retention-days: 90
   level:
     root: INFO
     org.hibernate.SQL: DEBUG
     org.hibernate.engine.jdbc.connections.internal.DriverManagerConnectionProviderImpl: DEBUG
     org.apache.flink: INFO
     org.springframework.jdbc: WARN
-    com.gpb.replication.postgres: DEBUG
+    com.gpb.replication: DEBUG
+    org.flywaydb: DEBUG
+  file:
+    name: logs/metadata-replication.log
+  pattern:
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    console: "%d{HH:mm:ss} %-5level %logger{36} - %msg%n"
+  logback:
+    rollingpolicy:
+      max-file-size: 50MB
+      max-history: 7

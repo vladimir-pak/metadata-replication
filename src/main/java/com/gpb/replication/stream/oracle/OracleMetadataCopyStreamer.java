@@ -1,0 +1,379 @@
+package com.gpb.replication.stream.oracle;
+
+import java.sql.Connection;
+import java.sql.ResultSet;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import com.gpb.replication.dto.DatabaseReplicationContext;
+import com.gpb.replication.enums.DatabaseType;
+import com.gpb.replication.stream.AbstractMetadataCopyStreamer;
+import com.gpb.replication.stream.PostgresCopyCsvEncoder;
+import com.gpb.replication.stream.SourceSqlBinder;
+import com.gpb.replication.utils.MetadataFqn;
+import com.gpb.replication.utils.MetadataHash;
+
+@Component
+public class OracleMetadataCopyStreamer
+        extends AbstractMetadataCopyStreamer {
+
+    private final ObjectMapper objectMapper;
+    private final int fetchSize;
+    private final int queryTimeoutSeconds;
+
+    public OracleMetadataCopyStreamer(
+            ObjectMapper objectMapper,
+            @Value("${replication.oracle.fetch-size:5000}")
+            int fetchSize,
+            @Value("${replication.oracle.query-timeout-seconds:0}")
+            int queryTimeoutSeconds) {
+
+        this.objectMapper = objectMapper;
+        this.fetchSize = fetchSize;
+        this.queryTimeoutSeconds =
+                queryTimeoutSeconds;
+    }
+
+    @Override
+    protected int getFetchSize() {
+        return fetchSize;
+    }
+
+    @Override
+    protected int getQueryTimeoutSeconds() {
+        return queryTimeoutSeconds;
+    }
+
+    public long streamDatabases(
+            Connection sourceConnection,
+            Connection targetConnection,
+            String sourceSql,
+            String serviceName) {
+
+        return copyDatabases(
+                sourceConnection,
+                targetConnection,
+                DatabaseType.ORACLE,
+                sourceSql,
+                SourceSqlBinder.NONE,
+                rs -> serializeDatabase(
+                        rs,
+                        serviceName
+                )
+        );
+    }
+
+    public long streamSchemas(
+            Connection sourceConnection,
+            Connection targetConnection,
+            String sourceSql,
+            String serviceName,
+            DatabaseReplicationContext database) {
+
+        return copySchemas(
+                sourceConnection,
+                targetConnection,
+                DatabaseType.ORACLE,
+                sourceSql,
+                SourceSqlBinder.NONE,
+                rs -> serializeSchema(
+                        rs,
+                        serviceName,
+                        database
+                )
+        );
+    }
+
+    public long streamTables(
+            Connection sourceConnection,
+            Connection targetConnection,
+            String sourceSql,
+            String serviceName,
+            DatabaseReplicationContext database) {
+
+        return copyTables(
+                sourceConnection,
+                targetConnection,
+                DatabaseType.ORACLE,
+                sourceSql,
+                SourceSqlBinder.NONE,
+                rs -> serializeTable(
+                        rs,
+                        serviceName,
+                        database
+                )
+        );
+    }
+
+    private byte[] serializeDatabase(
+            ResultSet rs,
+            String serviceName) throws Exception {
+
+        Long id = getLong(rs, "ID");
+
+        if (id == null) {
+            id = -1L;
+        }
+
+        String databaseName =
+                requiredString(
+                        rs,
+                        "DB_NAME"
+                );
+
+        String fqn =
+                MetadataFqn.database(
+                        serviceName,
+                        databaseName
+                );
+
+        String hash =
+                MetadataHash.sha256(
+                        databaseName
+                );
+
+        return PostgresCopyCsvEncoder.encode(
+                id,
+                fqn,
+                serviceName,
+                databaseName,
+                hash
+        );
+    }
+
+    private byte[] serializeSchema(
+            ResultSet rs,
+            String serviceName,
+            DatabaseReplicationContext database)
+            throws Exception {
+
+        Long id =
+                requiredLong(
+                        rs,
+                        "ID"
+                );
+
+        String schemaName =
+                requiredString(
+                        rs,
+                        "SCHEMA_NAME"
+                );
+
+        String fqn =
+                MetadataFqn.schema(
+                        serviceName,
+                        database.databaseName(),
+                        schemaName
+                );
+
+        String hash =
+                MetadataHash.sha256(
+                        schemaName
+                );
+
+        return PostgresCopyCsvEncoder.encode(
+                id,
+                fqn,
+                serviceName,
+                database.databaseName(),
+                schemaName,
+                database.databaseFqn(),
+                hash
+        );
+    }
+
+    private byte[] serializeTable(
+            ResultSet rs,
+            String serviceName,
+            DatabaseReplicationContext database)
+            throws Exception {
+
+        Long id =
+                requiredLong(
+                        rs,
+                        "OID"
+                );
+
+        String schemaName =
+                requiredString(
+                        rs,
+                        "SCHEMA_NAME"
+                );
+
+        String tableName =
+                requiredString(
+                        rs,
+                        "TABLE_NAME"
+                );
+
+        String description =
+                rs.getString("DESCRIPTION");
+
+        String fqn =
+                MetadataFqn.table(
+                        serviceName,
+                        database.databaseName(),
+                        schemaName,
+                        tableName
+                );
+
+        String parentFqn =
+                MetadataFqn.schema(
+                        serviceName,
+                        database.databaseName(),
+                        schemaName
+                );
+
+        String data =
+                buildTableData(rs);
+
+        String hash =
+                MetadataHash.sha256(
+                        description,
+                        data
+                );
+
+        return PostgresCopyCsvEncoder.encode(
+                id,
+                fqn,
+                serviceName,
+                database.databaseName(),
+                schemaName,
+                description,
+                tableName,
+                parentFqn,
+                data,
+                hash
+        );
+    }
+
+    private String buildTableData(
+            ResultSet rs) throws Exception {
+
+        ObjectNode data =
+                objectMapper.createObjectNode();
+
+        String tableType =
+                rs.getString("TABLE_TYPE");
+
+        String viewDefinition =
+                rs.getString(
+                        "VIEW_DEFINITION"
+                );
+
+        data.put(
+                "tableType",
+                tableType
+        );
+
+        if (viewDefinition == null) {
+            data.putNull("viewDefinition");
+        } else {
+            data.put(
+                    "viewDefinition",
+                    viewDefinition
+            );
+        }
+
+        data.set(
+                "columns",
+                parseArray(
+                        rs.getString(
+                                "COLUMNS_JSON"
+                        )
+                )
+        );
+
+        data.set(
+                "tableConstraints",
+                parseArray(
+                        rs.getString(
+                                "TABLE_CONSTRAINTS_JSON"
+                        )
+                )
+        );
+
+        return objectMapper
+                .writeValueAsString(data);
+    }
+
+    private ArrayNode parseArray(
+            String json) throws Exception {
+
+        if (json == null || json.isBlank()) {
+            return objectMapper.createArrayNode();
+        }
+
+        JsonNode node =
+                objectMapper.readTree(json);
+
+        if (!node.isArray()) {
+            throw new IllegalStateException(
+                    "Expected JSON array, got: "
+                            + node.getNodeType()
+            );
+        }
+
+        return (ArrayNode) node;
+    }
+
+    private Long getLong(
+            ResultSet rs,
+            String column) throws Exception {
+
+        Object value =
+                rs.getObject(column);
+
+        if (value == null) {
+            return null;
+        }
+
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+
+        return Long.valueOf(
+                value.toString()
+        );
+    }
+
+    private Long requiredLong(
+            ResultSet rs,
+            String column) throws Exception {
+
+        Long value =
+                getLong(rs, column);
+
+        if (value == null) {
+            throw new IllegalStateException(
+                    "Required column is NULL: "
+                            + column
+            );
+        }
+
+        return value;
+    }
+
+    private String requiredString(
+            ResultSet rs,
+            String column) throws Exception {
+
+        String value =
+                rs.getString(column);
+
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException(
+                    "Required column is empty: "
+                            + column
+            );
+        }
+
+        return value;
+    }
+}
