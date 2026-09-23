@@ -101,7 +101,7 @@ management:
 
 sources:
   connections:
-    provide: vault # ALLOWED: vault | file
+    provider: vault # ALLOWED: vault | file
     file-path: ${CONFIG_DIR:classpath:db-connections.json}
 
 replication:

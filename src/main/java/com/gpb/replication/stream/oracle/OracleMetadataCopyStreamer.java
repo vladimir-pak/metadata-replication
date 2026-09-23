@@ -197,7 +197,7 @@ public class OracleMetadataCopyStreamer
         Long id =
                 requiredLong(
                         rs,
-                        "OID"
+                        "ID"
                 );
 
         String schemaName =

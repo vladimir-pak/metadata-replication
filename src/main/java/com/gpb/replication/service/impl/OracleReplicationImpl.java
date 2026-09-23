@@ -3,6 +3,7 @@ package com.gpb.replication.service.impl;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.List;
 
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -16,6 +17,7 @@ import com.gpb.replication.dto.SourceConnection;
 import com.gpb.replication.enums.DatabaseType;
 import com.gpb.replication.enums.MetadataType;
 import com.gpb.replication.exceptions.MetadataReplicationException;
+import com.gpb.replication.metrics.MetricCounter;
 import com.gpb.replication.metrics.enums.IngestionMetricJob;
 import com.gpb.replication.repository.MetadataRepository;
 import com.gpb.replication.service.IngestionMetricService;
@@ -70,9 +72,9 @@ public class OracleReplicationImpl
 
         long started = System.nanoTime();
 
-        String serviceName = source.getServiceName();
-
         validateSource(source);
+
+        String serviceName = source.getServiceName();
 
         String sqlDatabase =
                 sqlQueryProvider.getQuery(
@@ -93,194 +95,373 @@ public class OracleReplicationImpl
                 );
 
         log.info(
-                "Starting Oracle metadata replication: serviceName={}",
-                serviceName
+            "Starting Oracle metadata replication. "
+            + "serviceName={}",
+            serviceName
         );
 
-        try (
-            Connection sourceConnection =
-                    sourceConnectionFactory.open(source)
-        ) {
+        try {
+
+            DatabaseReplicationContext database;
+
+            long databaseCount;
+
             /*
-             * Oracle:
-             * один database context в рамках connection.
-             */
-            DatabaseReplicationContext database =
-                    resolveDatabase(
-                        sourceConnection,
-                        sqlDatabase,
-                        serviceName
+            * Первый connection:
+            * resolve database + DATABASE replication.
+            */
+            try (
+                Connection sourceConnection =
+                        sourceConnectionFactory.open(source)
+            ) {
+                database =
+                        resolveDatabase(
+                            sourceConnection,
+                            sqlDatabase,
+                            serviceName
+                        );
+
+                databaseCount =
+                        ingestionMetricService.execute(
+                                runId,
+                                IngestionMetricJob.DATABASE_REPLICATION,
+                                counter ->
+                                        replicateDatabase(
+                                            sourceConnection,
+                                            sqlDatabase,
+                                            serviceName,
+                                            counter
+                                        )
+                        );
+            }
+
+            boolean databaseSnapshotCommitted = databaseCount == 1;
+
+            List<String> currentDatabaseNames =
+                    List.of(
+                        database.databaseName()
+                    );
+
+            long schemaCount =
+                    ingestionMetricService.execute(
+                            runId,
+                            IngestionMetricJob.SCHEMA_REPLICATION,
+                            counter -> {
+                                if (databaseSnapshotCommitted) {
+                                    cleanupStaleSchemas(
+                                        serviceName,
+                                        currentDatabaseNames,
+                                        DatabaseType.ORACLE,
+                                        counter
+                                    );
+
+                                } else {
+                                    log.warn(
+                                        "Skipping stale SCHEMA cleanup because "
+                                        + "DATABASE snapshot was not committed. "
+                                        + "serviceName={}",
+                                        serviceName
+                                    );
+                                }
+
+                                return replicateSchemas(
+                                    source,
+                                    sqlSchema,
+                                    serviceName,
+                                    database,
+                                    counter
+                                );
+                            }
+                    );
+
+            long tableCount =
+                    ingestionMetricService.execute(
+                            runId,
+                            IngestionMetricJob.TABLE_REPLICATION,
+                            counter -> {
+                                if (databaseSnapshotCommitted) {
+                                    cleanupStaleTables(
+                                        serviceName,
+                                        currentDatabaseNames,
+                                        DatabaseType.ORACLE,
+                                        counter
+                                    );
+
+                                } else {
+
+                                    log.warn(
+                                        "Skipping stale TABLE cleanup because "
+                                        + "DATABASE snapshot was not committed. "
+                                        + "serviceName={}",
+                                        serviceName
+                                    );
+                                }
+
+                                return replicateTables(
+                                    source,
+                                    sqlTable,
+                                    serviceName,
+                                    database,
+                                    counter
+                                );
+                            }
                     );
 
             ReplicationStats stats =
-                    inTargetTransaction(
-                            targetConnection -> {
-                                
-                                long databases =
-                                    ingestionMetricService.execute(
-                                        runId,
-                                        IngestionMetricJob.DATABASE_REPLICATION,
-                                        counter -> {
-                                            /*
-                                            * DELETE включаем в первый job,
-                                            * чтобы ошибка очистки тоже
-                                            * сделала DATABASE_REPLICATION FAILED.
-                                            */
-                                            deleteServiceSnapshot(
-                                                serviceName,
-                                                DatabaseType.ORACLE
-                                            );
-
-                                            long count =
-                                                    streamDatabase(
-                                                        sourceConnection,
-                                                        targetConnection,
-                                                        sqlDatabase,
-                                                        serviceName
-                                                    );
-
-                                            if (count != 1) {
-                                                throw new MetadataReplicationException(
-                                                        "Expected exactly one "
-                                                        + "Oracle database, but received "
-                                                        + count
-                                                );
-                                            }
-
-                                            counter.success(count);
-
-                                            return count;
-                                        }
-                                    );
-
-                            long schemas =
-                                    ingestionMetricService.execute(
-                                        runId,
-                                        IngestionMetricJob.SCHEMA_REPLICATION,
-                                        counter -> {
-                                            long count =
-                                                    streamSchema(
-                                                        sourceConnection,
-                                                        targetConnection,
-                                                        sqlSchema,
-                                                        serviceName,
-                                                        database
-                                                    );
-
-                                            counter.success(count);
-
-                                            return count;
-                                        }
-                                    );
-
-                            long tables =
-                                    ingestionMetricService.execute(
-                                        runId,
-                                        IngestionMetricJob.TABLE_REPLICATION,
-                                        counter -> {
-                                            long count =
-                                                    streamTable(
-                                                        sourceConnection,
-                                                        targetConnection,
-                                                        sqlTable,
-                                                        serviceName,
-                                                        database
-                                                    );
-
-                                            counter.success(count);
-
-                                            return count;
-                                        }
-                                    );
-
-                            return new ReplicationStats(
-                                databases,
-                                schemas,
-                                tables
-                            );
-                        }
+                    new ReplicationStats(
+                        databaseCount,
+                        schemaCount,
+                        tableCount
                     );
 
             long elapsedMs = (System.nanoTime() - started) / 1_000_000;
 
             log.info(
-                    "Oracle metadata replication completed: "
-                    + "serviceName={}, database={}, "
-                    + "databases={}, schemas={}, tables={}, "
-                    + "elapsedMs={}",
-                    serviceName,
-                    database.databaseName(),
-                    stats.databases(),
-                    stats.schemas(),
-                    stats.tables(),
-                    elapsedMs
+                "Oracle metadata replication completed. "
+                + "serviceName={}, database={}, "
+                + "databases={}, schemas={}, tables={}, "
+                + "elapsedMs={}",
+                serviceName,
+                database.databaseName(),
+                stats.databases(),
+                stats.schemas(),
+                stats.tables(),
+                elapsedMs
             );
 
         } catch (MetadataReplicationException e) {
+
             log.error(
-                    "Oracle metadata replication failed: serviceName={}",
-                    serviceName,
-                    e
+                "Oracle metadata replication failed. "
+                + "serviceName={}",
+                serviceName,
+                e
             );
+
             throw e;
+
         } catch (Exception e) {
+
             log.error(
-                    "Oracle metadata replication failed: serviceName={}",
-                    serviceName,
-                    e
+                "Oracle metadata replication failed. "
+                + "serviceName={}",
+                serviceName,
+                e
             );
+
             throw new MetadataReplicationException(
                     "Oracle metadata replication failed: "
-                            + serviceName,
+                    + serviceName,
                     e
             );
         }
     }
 
-    private long streamDatabase(
+    private long replicateDatabase(
             Connection sourceConnection,
-            Connection targetConnection,
-            String sql,
-            String serviceName) {
-
-        return copyStreamer.streamDatabases(
-            sourceConnection,
-            targetConnection,
-            sql,
-            serviceName
-        );
-    }
-
-    private long streamSchema(
-            Connection sourceConnection,
-            Connection targetConnection,
             String sql,
             String serviceName,
-            DatabaseReplicationContext database) {
+            MetricCounter counter) {
 
-        return copyStreamer.streamSchemas(
-            sourceConnection,
-            targetConnection,
-            sql,
-            serviceName,
-            database
-        );
+        try {
+
+            long count =
+                    inTargetTransaction(
+                            targetConnection -> {
+                                metadataRepository
+                                        .deleteDatabaseMetadata(
+                                            serviceName,
+                                            DatabaseType.ORACLE
+                                        );
+
+                                long copied =
+                                        copyStreamer
+                                                .streamDatabases(
+                                                    sourceConnection,
+                                                    targetConnection,
+                                                    sql,
+                                                    serviceName
+                                                );
+
+                                if (copied != 1) {
+
+                                    throw new MetadataReplicationException(
+                                            "Expected exactly one Oracle database, "
+                                            + "but received "
+                                            + copied
+                                    );
+                                }
+
+                                return copied;
+                            }
+                    );
+
+            counter.success(count);
+
+            log.info(
+                "Oracle DATABASE metadata committed. "
+                + "serviceName={}, count={}",
+                serviceName,
+                count
+            );
+
+            return count;
+
+        } catch (Exception e) {
+
+            counter.error();
+
+            log.error(
+                "Oracle metadata replication error. "
+                + "entityType=DATABASE, "
+                + "entityName={}, "
+                + "serviceName={}",
+                serviceName,
+                serviceName,
+                e
+            );
+
+            /*
+            * Не прерываем pipeline.
+            */
+            return 0;
+        }
     }
 
-    private long streamTable(
-            Connection sourceConnection,
-            Connection targetConnection,
+    private long replicateSchemas(
+            SourceConnection source,
             String sql,
             String serviceName,
-            DatabaseReplicationContext database) {
+            DatabaseReplicationContext database,
+            MetricCounter counter) {
 
-        return copyStreamer.streamTables(
-            sourceConnection,
-            targetConnection,
-            sql,
-            serviceName,
-            database
-        );
+        String databaseName = database.databaseName();
+
+        try (
+                Connection sourceConnection =
+                        sourceConnectionFactory.open(source)
+        ) {
+
+            long count =
+                    inTargetTransaction(
+                            targetConnection -> {
+
+                                metadataRepository
+                                        .deleteSchemaMetadata(
+                                            serviceName,
+                                            databaseName,
+                                            DatabaseType.ORACLE
+                                        );
+
+                                return copyStreamer
+                                        .streamSchemas(
+                                            sourceConnection,
+                                            targetConnection,
+                                            sql,
+                                            serviceName,
+                                            database
+                                        );
+                            }
+                    );
+
+            counter.success(count);
+
+            log.info(
+                "Oracle SCHEMA metadata committed. "
+                + "serviceName={}, database={}, count={}",
+                serviceName,
+                databaseName,
+                count
+            );
+
+            return count;
+
+        } catch (Exception e) {
+
+            counter.error();
+
+            log.error(
+                "Oracle metadata replication error. "
+                + "entityType=SCHEMA, "
+                + "entityName={}.*, "
+                + "database={}, "
+                + "serviceName={}",
+                databaseName,
+                databaseName,
+                serviceName,
+                e
+            );
+
+            return 0;
+        }
+    }
+
+    private long replicateTables(
+            SourceConnection source,
+            String sql,
+            String serviceName,
+            DatabaseReplicationContext database,
+            MetricCounter counter) {
+
+        String databaseName = database.databaseName();
+
+        try (
+                Connection sourceConnection =
+                        sourceConnectionFactory.open(source)
+        ) {
+
+            long count =
+                    inTargetTransaction(
+                            targetConnection -> {
+
+                                metadataRepository
+                                        .deleteTableMetadata(
+                                            serviceName,
+                                            databaseName,
+                                            DatabaseType.ORACLE
+                                        );
+
+                                return copyStreamer
+                                        .streamTables(
+                                            sourceConnection,
+                                            targetConnection,
+                                            sql,
+                                            serviceName,
+                                            database
+                                        );
+                            }
+                    );
+
+            counter.success(count);
+
+            log.info(
+                "Oracle TABLE metadata committed. "
+                + "serviceName={}, database={}, count={}",
+                serviceName,
+                databaseName,
+                count
+            );
+
+            return count;
+
+        } catch (Exception e) {
+
+            counter.error();
+
+            log.error(
+                "Oracle metadata replication error. "
+                + "entityType=TABLE, "
+                + "entityName={}.*, "
+                + "database={}, "
+                + "serviceName={}",
+                databaseName,
+                databaseName,
+                serviceName,
+                e
+            );
+
+            return 0;
+        }
     }
 
     private DatabaseReplicationContext resolveDatabase(
@@ -299,8 +480,7 @@ public class OracleReplicationImpl
             statement.setFetchSize(1);
 
             try (
-                ResultSet rs =
-                        statement.executeQuery()
+                ResultSet rs = statement.executeQuery()
             ) {
                 if (!rs.next()) {
                     throw new MetadataReplicationException(
@@ -319,7 +499,7 @@ public class OracleReplicationImpl
                 if (rs.next()) {
                     throw new MetadataReplicationException(
                             "More than one database returned "
-                                    + "for Oracle connection"
+                            + "for Oracle connection"
                     );
                 }
 
@@ -364,12 +544,12 @@ public class OracleReplicationImpl
                 || !DatabaseType.ORACLE
                         .name()
                         .equalsIgnoreCase(
-                                source.getDbType()
+                            source.getDbType()
                         )) {
 
             throw new MetadataReplicationException(
                     "Expected ORACLE connection, actual="
-                            + source.getDbType()
+                    + source.getDbType()
             );
         }
     }

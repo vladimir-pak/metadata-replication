@@ -119,7 +119,7 @@ UNION ALL
 
 
 SELECT
-    o.object_id AS OID,
+    o.object_id AS id,
     v.owner AS SCHEMA_NAME,
     v.view_name AS TABLE_NAME,
     'VIEW' AS TABLE_TYPE,
@@ -172,7 +172,7 @@ UNION ALL
 
 
 SELECT
-    o.object_id AS OID,
+    o.object_id AS id,
     v.owner AS SCHEMA_NAME,
     v.mview_name AS TABLE_NAME,
     'MATERIALIZED_VIEW' AS TABLE_TYPE,

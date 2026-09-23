@@ -81,44 +81,62 @@ public class IngestionMetricService {
             IngestionMetricJob job,
             Function<MetricCounter, T> action) {
 
-        MetricCounter counter =
-                new MetricCounter();
+        MetricCounter counter = new MetricCounter();
 
         requiresNew(() ->
-                repository.markRunning(
-                        runId,
-                        job
-                )
+            repository.markRunning(
+                runId,
+                job
+            )
         );
 
         log.info(
-                "Ingestion job started. runId={}, job={}",
-                runId,
-                job
+            "Ingestion job started. runId={}, job={}",
+            runId,
+            job
         );
 
         try {
+            T result = action.apply(counter);
 
-            T result =
-                    action.apply(counter);
-
-            requiresNew(() ->
-                    repository.markDone(
-                            runId,
-                            job,
-                            counter
+            if (counter.getErrorCount() > 0) {
+                requiresNew(() ->
+                    repository.markFailed(
+                        runId,
+                        job,
+                        counter
                     )
-            );
+                );
 
-            log.info(
-                    "Ingestion job completed. "
-                            + "runId={}, job={}, "
-                            + "successCount={}, errorCount={}",
+                log.warn(
+                    "Ingestion job completed with errors. "
+                    + "runId={}, job={}, "
+                    + "successCount={}, errorCount={}",
                     runId,
                     job,
                     counter.getSuccessCount(),
                     counter.getErrorCount()
-            );
+                );
+
+            } else {
+                requiresNew(() ->
+                    repository.markDone(
+                        runId,
+                        job,
+                        counter
+                    )
+                );
+
+                log.info(
+                    "Ingestion job completed. "
+                    + "runId={}, job={}, "
+                    + "successCount={}, errorCount={}",
+                    runId,
+                    job,
+                    counter.getSuccessCount(),
+                    counter.getErrorCount()
+                );
+            }
 
             return result;
 
@@ -129,22 +147,19 @@ public class IngestionMetricService {
             }
 
             try {
-
                 requiresNew(() ->
-                        repository.markFailed(
-                                runId,
-                                job,
-                                counter
-                        )
+                    repository.markFailed(
+                        runId,
+                        job,
+                        counter
+                    )
                 );
 
             } catch (RuntimeException metricException) {
-
                 e.addSuppressed(metricException);
-
                 log.error(
                         "Failed to update job to FAILED. "
-                                + "runId={}, job={}",
+                        + "runId={}, job={}",
                         runId,
                         job,
                         metricException

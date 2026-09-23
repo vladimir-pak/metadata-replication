@@ -15,20 +15,20 @@ import java.security.Principal;
 @RequiredArgsConstructor
 public class SvoiApiLogAspect {
 
-    private final SvoiLogger svoiCustomLogger;
+    private final SvoiLogger svoiLogger;
 
     @Before("@annotation(svoiApiLog)")
     public void logApiRequest(SvoiApiLog svoiApiLog) {
         HttpServletRequest request = resolveRequest();
 
         if (request == null) {
-            svoiCustomLogger.sendApiRequest(
-                    "UNDEFINED",
-                    "Error while parsing HttpServletRequest",
-                    "UNDEFINED",
-                    "UNDEFINED",
-                    "UNDEFINED",
-                    -1
+            svoiLogger.sendApiRequest(
+                "UNDEFINED",
+                "Error while parsing HttpServletRequest",
+                "UNDEFINED",
+                "UNDEFINED",
+                "UNDEFINED",
+                -1
             );
             return;
         }
@@ -41,13 +41,13 @@ public class SvoiApiLogAspect {
         String clientHost = request.getRemoteHost();
         int clientPort = request.getRemotePort();
 
-        svoiCustomLogger.sendApiRequest(
-                endpoint,
-                functionName,
-                username,
-                clientIp,
-                clientHost,
-                clientPort
+        svoiLogger.sendApiRequest(
+            endpoint,
+            functionName,
+            username,
+            clientIp,
+            clientHost,
+            clientPort
         );
     }
 

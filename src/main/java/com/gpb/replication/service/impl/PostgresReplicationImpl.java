@@ -20,6 +20,7 @@ import com.gpb.replication.dto.SourceConnection;
 import com.gpb.replication.enums.DatabaseType;
 import com.gpb.replication.enums.MetadataType;
 import com.gpb.replication.exceptions.MetadataReplicationException;
+import com.gpb.replication.metrics.MetricCounter;
 import com.gpb.replication.metrics.enums.IngestionMetricJob;
 import com.gpb.replication.repository.MetadataRepository;
 import com.gpb.replication.service.IngestionMetricService;
@@ -33,8 +34,7 @@ import lombok.extern.slf4j.Slf4j;
 
 @Service
 @Slf4j
-public class PostgresReplicationImpl
-        extends ReplicationService {
+public class PostgresReplicationImpl extends ReplicationService {
 
     private final SqlQueryProvider sqlQueryProvider;
 
@@ -112,139 +112,48 @@ public class PostgresReplicationImpl
          * SourceJdbcConnectionFactory сам применяет
          * failover по source.url.
          */
+        List<DatabaseReplicationContext> databases;
+        long databaseCount;
+
         try (
-            Connection discoveryConnection =
-                    sourceConnectionFactory.open(source)
+                Connection discoveryConnection =
+                        sourceConnectionFactory.open(source)
         ) {
-            List<DatabaseReplicationContext> databases =
+
+            databases =
                     discoverDatabases(
-                        discoveryConnection,
-                        sqlDatabase,
-                        serviceName
+                            discoveryConnection,
+                            sqlDatabase,
+                            serviceName
                     );
 
             if (databases.isEmpty()) {
                 throw new MetadataReplicationException(
-                        "No PostgreSQL databases found. "
-                        + "serviceName="
-                        + serviceName
+                        "No PostgreSQL databases found. serviceName="
+                                + serviceName
                 );
             }
 
             log.info(
-                "PostgreSQL databases discovered: "
-                + "serviceName={}, count={}",
-                serviceName,
-                databases.size()
+                    "PostgreSQL databases discovered: "
+                            + "serviceName={}, count={}",
+                    serviceName,
+                    databases.size()
             );
 
-            ReplicationStats stats =
-                    inTargetTransaction(
-                            targetConnection -> {
-
-                                long databaseCount =
-                                        ingestionMetricService.execute(
-                                                runId,
-                                                IngestionMetricJob.DATABASE_REPLICATION,
-                                                counter -> {
-                                                    /*
-                                                     * Полная замена snapshot
-                                                     * данного service.
-                                                     *
-                                                     * Вызывать только один раз.
-                                                     */
-                                                    deleteServiceSnapshot(
-                                                        serviceName,
-                                                        DatabaseType.POSTGRES
-                                                    );
-
-                                                    long count =
-                                                            copyStreamer
-                                                                    .streamDatabases(
-                                                                        discoveryConnection,
-                                                                        targetConnection,
-                                                                        sqlDatabase,
-                                                                        serviceName
-                                                                    );
-
-                                                    if (count != databases.size()) {
-                                                        throw new MetadataReplicationException(
-                                                                "PostgreSQL database count mismatch. "
-                                                                + "discovered="
-                                                                + databases.size()
-                                                                + ", copied="
-                                                                + count
-                                                        );
-                                                    }
-
-                                                    counter.success(count);
-
-                                                    return count;
-                                                }
-                                        );
-
-                                long schemaCount =
-                                        ingestionMetricService.execute(
-                                                runId,
-                                                IngestionMetricJob.SCHEMA_REPLICATION,
-                                                counter -> {
-                                                    long count =
-                                                            streamSchemas(
-                                                                source,
-                                                                targetConnection,
-                                                                sqlSchema,
-                                                                serviceName,
-                                                                databases
-                                                            );
-
-                                                    counter.success(count);
-
-                                                    return count;
-                                                }
-                                        );
-
-                                long tableCount =
-                                        ingestionMetricService.execute(
-                                                runId,
-                                                IngestionMetricJob.TABLE_REPLICATION,
-                                                counter -> {
-                                                    long count =
-                                                            streamTables(
-                                                                source,
-                                                                targetConnection,
-                                                                sqlTable,
-                                                                serviceName,
-                                                                databases
-                                                            );
-
-                                                    counter.success(count);
-
-                                                    return count;
-                                                }
-                                        );
-
-                                return new ReplicationStats(
-                                    databaseCount,
-                                    schemaCount,
-                                    tableCount
-                                );
-                            }
+            databaseCount =
+                    ingestionMetricService.execute(
+                            runId,
+                            IngestionMetricJob.DATABASE_REPLICATION,
+                            counter ->
+                                    replicateDatabases(
+                                            discoveryConnection,
+                                            sqlDatabase,
+                                            serviceName,
+                                            databases,
+                                            counter
+                                    )
                     );
-
-            long elapsedMs = (System.nanoTime() - started) / 1_000_000;
-
-            log.info(
-                "PostgreSQL metadata replication completed: "
-                + "serviceName={}, "
-                + "databases={}, schemas={}, tables={}, "
-                + "elapsedMs={}",
-                serviceName,
-                stats.databases(),
-                stats.schemas(),
-                stats.tables(),
-                elapsedMs
-            );
-
         } catch (MetadataReplicationException e) {
             log.error(
                 "PostgreSQL metadata replication failed: "
@@ -269,6 +178,359 @@ public class PostgresReplicationImpl
                 e
             );
         }
+            
+        boolean databaseSnapshotCommitted =
+                databaseCount == databases.size();
+
+        List<String> currentDatabaseNames =
+                databases.stream()
+                        .map(DatabaseReplicationContext::databaseName)
+                        .toList();
+
+        long schemaCount =
+                ingestionMetricService.execute(
+                        runId,
+                        IngestionMetricJob.SCHEMA_REPLICATION,
+                        counter -> {
+                            if (databaseSnapshotCommitted) {
+
+                                cleanupStaleSchemas(
+                                    serviceName,
+                                    currentDatabaseNames,
+                                    DatabaseType.POSTGRES,
+                                    counter
+                                );
+
+                            } else {
+
+                                log.warn(
+                                        "Skipping stale SCHEMA cleanup because "
+                                        + "DATABASE snapshot was not committed. "
+                                        + "serviceName={}",
+                                        serviceName
+                                );
+                            }
+
+                            return replicateSchemas(
+                                source,
+                                sqlSchema,
+                                serviceName,
+                                databases,
+                                counter
+                            );
+                        }
+                );
+
+        long tableCount =
+                ingestionMetricService.execute(
+                        runId,
+                        IngestionMetricJob.TABLE_REPLICATION,
+                        counter -> {
+
+                            if (databaseSnapshotCommitted) {
+
+                                cleanupStaleTables(
+                                    serviceName,
+                                    currentDatabaseNames,
+                                    DatabaseType.POSTGRES,
+                                    counter
+                                );
+
+                            } else {
+
+                                log.warn(
+                                    "Skipping stale TABLE cleanup because "
+                                    + "DATABASE snapshot was not committed. "
+                                    + "serviceName={}",
+                                    serviceName
+                                );
+                            }
+
+                            return replicateTables(
+                                source,
+                                sqlTable,
+                                serviceName,
+                                databases,
+                                counter
+                            );
+                        }
+                );
+
+        ReplicationStats stats =
+                new ReplicationStats(
+                    databaseCount,
+                    schemaCount,
+                    tableCount
+                );
+
+        long elapsedMs = (System.nanoTime() - started) / 1_000_000;
+
+        log.info(
+            "PostgreSQL metadata replication completed: "
+            + "serviceName={}, "
+            + "databases={}, schemas={}, tables={}, "
+            + "elapsedMs={}",
+            serviceName,
+            stats.databases(),
+            stats.schemas(),
+            stats.tables(),
+            elapsedMs
+        );
+    }
+
+    private long replicateDatabases(
+            Connection discoveryConnection,
+            String sql,
+            String serviceName,
+            List<DatabaseReplicationContext> databases,
+            MetricCounter counter) {
+        try {
+            long count =
+                    inTargetTransaction(
+                            targetConnection -> {
+                                metadataRepository
+                                        .deleteDatabaseMetadata(
+                                            serviceName,
+                                            DatabaseType.POSTGRES
+                                        );
+
+                                long copied =
+                                        copyStreamer.streamDatabases(
+                                            discoveryConnection,
+                                            targetConnection,
+                                            sql,
+                                            serviceName
+                                        );
+
+                                if (copied != databases.size()) {
+
+                                    throw new MetadataReplicationException(
+                                            "PostgreSQL database count mismatch. "
+                                            + "discovered="
+                                            + databases.size()
+                                            + ", copied="
+                                            + copied
+                                    );
+                                }
+
+                                return copied;
+                            }
+                    );
+
+            counter.success(count);
+
+            log.info(
+                "PostgreSQL DATABASE metadata committed. "
+                + "serviceName={}, count={}",
+                serviceName,
+                count
+            );
+
+            return count;
+
+        } catch (Exception e) {
+            counter.error();
+
+            log.error(
+                "PostgreSQL metadata replication error. "
+                + "entityType=DATABASE, "
+                + "entityName={}, "
+                + "serviceName={}",
+                serviceName,
+                serviceName,
+                e
+            );
+
+            /*
+            * Не пробрасываем exception.
+            * SCHEMA_REPLICATION должен продолжиться.
+            */
+            return 0;
+        }
+    }
+
+    private long replicateSchemas(
+            SourceConnection source,
+            String sql,
+            String serviceName,
+            List<DatabaseReplicationContext> databases,
+            MetricCounter counter) {
+
+        long total = 0;
+
+        for (DatabaseReplicationContext database
+                : databases) {
+
+            String databaseName =
+                    database.databaseName();
+
+            log.info(
+                "Starting PostgreSQL SCHEMA replication. "
+                + "serviceName={}, database={}",
+                serviceName,
+                databaseName
+            );
+
+            /*
+            * Source connection открываем ДО target transaction.
+            *
+            * Если connection к конкретной DB не установился,
+            * target DB вообще не затрагивается.
+            */
+            try (
+                Connection sourceConnection =
+                        openDatabaseConnection(
+                            source,
+                            databaseName
+                        )
+            ) {
+
+                long count =
+                        inTargetTransaction(
+                                targetConnection -> {
+                                    /*
+                                    * Удаляем snapshot schemas
+                                    * только конкретной DB.
+                                    */
+                                    metadataRepository
+                                            .deleteSchemaMetadata(
+                                                serviceName,
+                                                databaseName,
+                                                DatabaseType.POSTGRES
+                                            );
+
+                                    return copyStreamer
+                                            .streamSchemas(
+                                                sourceConnection,
+                                                targetConnection,
+                                                sql,
+                                                serviceName,
+                                                database
+                                            );
+                                }
+                        );
+
+                /*
+                * До этой строки дошли =
+                * Spring transaction уже COMMIT.
+                */
+                counter.success(count);
+
+                total += count;
+
+                log.info(
+                    "PostgreSQL SCHEMA metadata committed. "
+                    + "serviceName={}, database={}, "
+                    + "count={}",
+                    serviceName,
+                    databaseName,
+                    count
+                );
+
+            } catch (Exception e) {
+
+                /*
+                * Ошибка одной DB не останавливает остальные.
+                */
+                counter.error();
+
+                log.error(
+                    "PostgreSQL metadata replication error. "
+                    + "entityType=SCHEMA, "
+                    + "entityName={}.*, "
+                    + "database={}, "
+                    + "serviceName={}",
+                    databaseName,
+                    databaseName,
+                    serviceName,
+                    e
+                );
+            }
+        }
+
+        return total;
+    }
+
+    private long replicateTables(
+            SourceConnection source,
+            String sql,
+            String serviceName,
+            List<DatabaseReplicationContext> databases,
+            MetricCounter counter) {
+
+        long total = 0;
+
+        for (DatabaseReplicationContext database : databases) {
+
+            String databaseName = database.databaseName();
+
+            log.info(
+                "Starting PostgreSQL TABLE replication. "
+                + "serviceName={}, database={}",
+                serviceName,
+                databaseName
+            );
+
+            try (
+                Connection sourceConnection =
+                        openDatabaseConnection(
+                            source,
+                            databaseName
+                        )
+            ) {
+                long count =
+                        inTargetTransaction(
+                                targetConnection -> {
+                                    metadataRepository
+                                            .deleteTableMetadata(
+                                                serviceName,
+                                                databaseName,
+                                                DatabaseType.POSTGRES
+                                            );
+
+                                    return copyStreamer
+                                            .streamTables(
+                                                sourceConnection,
+                                                targetConnection,
+                                                sql,
+                                                serviceName,
+                                                database
+                                            );
+                                }
+                        );
+
+                counter.success(count);
+
+                total += count;
+
+                log.info(
+                    "PostgreSQL TABLE metadata committed. "
+                    + "serviceName={}, database={}, "
+                    + "count={}",
+                    serviceName,
+                    databaseName,
+                    count
+                );
+
+            } catch (Exception e) {
+
+                counter.error();
+
+                log.error(
+                    "PostgreSQL metadata replication error. "
+                    + "entityType=TABLE, "
+                    + "entityName={}.*, "
+                    + "database={}, "
+                    + "serviceName={}",
+                    databaseName,
+                    databaseName,
+                    serviceName,
+                    e
+                );
+            }
+        }
+
+        return total;
     }
 
     private List<DatabaseReplicationContext> discoverDatabases(
@@ -328,102 +590,6 @@ public class PostgresReplicationImpl
                     e
             );
         }
-    }
-
-    private long streamSchemas(
-            SourceConnection source,
-            Connection targetConnection,
-            String sql,
-            String serviceName,
-            List<DatabaseReplicationContext> databases) {
-
-        long total = 0;
-
-        for (DatabaseReplicationContext database : databases) {
-            log.info(
-                "Streaming PostgreSQL schemas: "
-                + "serviceName={}, database={}",
-                serviceName,
-                database.databaseName()
-            );
-
-            try (
-                Connection sourceConnection =
-                        openDatabaseConnection(
-                            source,
-                            database.databaseName()
-                        )
-            ) {
-                total +=
-                        copyStreamer.streamSchemas(
-                            sourceConnection,
-                            targetConnection,
-                            sql,
-                            serviceName,
-                            database
-                        );
-            } catch (Exception e) {
-                throw new MetadataReplicationException(
-                        "Failed to replicate PostgreSQL schemas. "
-                        + "serviceName="
-                        + serviceName
-                        + ", database="
-                        + database.databaseName(),
-                        e
-                );
-            }
-        }
-
-        return total;
-    }
-
-    private long streamTables(
-            SourceConnection source,
-            Connection targetConnection,
-            String sql,
-            String serviceName,
-            List<DatabaseReplicationContext> databases) {
-
-        long total = 0;
-
-        for (DatabaseReplicationContext database : databases) {
-            log.info(
-                    "Streaming PostgreSQL tables: "
-                    + "serviceName={}, database={}",
-                    serviceName,
-                    database.databaseName()
-            );
-
-            try (
-                Connection sourceConnection =
-                        openDatabaseConnection(
-                            source,
-                            database.databaseName()
-                        )
-            ) {
-
-                total += copyStreamer.streamTables(
-                            sourceConnection,
-                            targetConnection,
-                            sql,
-                            serviceName,
-                            database
-                        );
-
-            } catch (Exception e) {
-
-                throw new MetadataReplicationException(
-                        "Failed to replicate PostgreSQL tables. "
-                        + "serviceName="
-                        + serviceName
-                        + ", database="
-                        + database.databaseName(),
-                        e
-                );
-            }
-        }
-
-        return total;
     }
 
     private Connection openDatabaseConnection(

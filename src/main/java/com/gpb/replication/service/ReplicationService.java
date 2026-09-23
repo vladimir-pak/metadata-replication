@@ -2,6 +2,7 @@ package com.gpb.replication.service;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.Objects;
 
 import org.springframework.jdbc.core.ConnectionCallback;
@@ -14,6 +15,7 @@ import com.gpb.replication.connection.SourceJdbcConnectionFactory;
 import com.gpb.replication.dto.SourceConnection;
 import com.gpb.replication.enums.DatabaseType;
 import com.gpb.replication.exceptions.MetadataReplicationException;
+import com.gpb.replication.metrics.MetricCounter;
 import com.gpb.replication.repository.MetadataRepository;
 
 import lombok.extern.slf4j.Slf4j;
@@ -46,8 +48,7 @@ public abstract class ReplicationService {
 
         this.sourceConnectionFactory = sourceConnectionFactory;
 
-        this.targetTransactionTemplate =
-                new TransactionTemplate(transactionManager);
+        this.targetTransactionTemplate = new TransactionTemplate(transactionManager);
 
         this.ingestionMetricService = ingestionMetricService;
     }
@@ -152,6 +153,87 @@ public abstract class ReplicationService {
                 serviceName,
                 databaseType
         );
+    }
+
+    protected final void cleanupStaleSchemas(
+            String serviceName,
+            List<String> databaseNames,
+            DatabaseType databaseType,
+            MetricCounter counter) {
+        try {
+            int deleted =
+                    inTargetTransaction(
+                            connection ->
+                                    metadataRepository
+                                            .deleteSchemaMetadataNotInDatabases(
+                                                serviceName,
+                                                databaseNames,
+                                                databaseType
+                                            )
+                    );
+
+            log.info(
+                "Stale schema metadata cleanup committed. "
+                + "serviceName={}, databaseType={}, deleted={}",
+                serviceName,
+                databaseType,
+                deleted
+            );
+
+        } catch (Exception e) {
+            counter.error();
+
+            log.error(
+                "Metadata cleanup failed. "
+                + "entityType=SCHEMA, "
+                + "entityName=STALE_DATABASES, "
+                + "serviceName={}, databaseType={}",
+                serviceName,
+                databaseType,
+                e
+            );
+        }
+    }
+
+    protected final void cleanupStaleTables(
+            String serviceName,
+            List<String> databaseNames,
+            DatabaseType databaseType,
+            MetricCounter counter) {
+
+        try {
+            int deleted =
+                    inTargetTransaction(
+                            connection ->
+                                    metadataRepository
+                                            .deleteTableMetadataNotInDatabases(
+                                                serviceName,
+                                                databaseNames,
+                                                databaseType
+                                            )
+                    );
+
+            log.info(
+                "Stale table metadata cleanup committed. "
+                + "serviceName={}, databaseType={}, deleted={}",
+                serviceName,
+                databaseType,
+                deleted
+            );
+
+        } catch (Exception e) {
+            counter.error();
+
+            log.error(
+                "Metadata cleanup failed. "
+                + "entityType=TABLE, "
+                + "entityName=STALE_DATABASES, "
+                + "serviceName={}, databaseType={}",
+                serviceName,
+                databaseType,
+                e
+            );
+        }
     }
 
     @FunctionalInterface

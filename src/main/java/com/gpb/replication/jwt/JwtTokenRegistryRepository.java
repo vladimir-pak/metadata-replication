@@ -23,7 +23,7 @@ public class JwtTokenRegistryRepository {
             Instant expiresAt
     ) {
         jdbcTemplate.update("""
-                insert into replication.jwt_token_registry (
+                insert into metadata_replication.jwt_token_registry (
                     jti,
                     service,
                     subject,
@@ -45,7 +45,7 @@ public class JwtTokenRegistryRepository {
         Boolean result = jdbcTemplate.queryForObject("""
                 select exists (
                     select 1
-                    from replication.jwt_token_registry
+                    from metadata_replication.jwt_token_registry
                     where jti = ?
                       and service = ?
                       and revoked_at is null
@@ -63,7 +63,7 @@ public class JwtTokenRegistryRepository {
     public boolean revoke(String service) {
 
         int updated = jdbcTemplate.update("""
-                update replication.jwt_token_registry
+                update metadata_replication.jwt_token_registry
                 set revoked_at = current_timestamp
                 where service = ?
                   and revoked_at is null
@@ -79,7 +79,7 @@ public class JwtTokenRegistryRepository {
         Boolean exists = jdbcTemplate.queryForObject("""
                 select exists (
                     select 1
-                    from replication.jwt_token_registry
+                    from metadata_replication.jwt_token_registry
                     where service = ?
                     and revoked_at is null
                     and expires_at > current_timestamp

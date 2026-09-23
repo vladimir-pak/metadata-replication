@@ -25,7 +25,7 @@ public class VaultSecretService {
     public VaultSecretService(
             VaultTemplate vaultTemplate,
             @Value("${spring.cloud.vault.kv.backend:secret}") String backend,
-            @Value("${replication.vault.connection-path:ord/src/connections}")
+            @Value("${spring.cloud.vault.kv.default-context:ord/src/connections}")
             String connectionPath) {
 
         this.vaultTemplate = vaultTemplate;

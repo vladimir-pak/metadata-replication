@@ -25,7 +25,7 @@ import com.gpb.replication.service.ReplicationService;
 import com.gpb.replication.service.ReplicationServiceRegistry;
 
 @RestController
-@RequestMapping("/api/v1/replication")
+@RequestMapping("/api/v1")
 @RequiredArgsConstructor
 @Tag(
     name = "Replication",
@@ -38,12 +38,11 @@ public class ReplicationController {
     private final ReplicationServiceRegistry replicationServiceRegistry;
     private final IngestionMetricService ingestionMetricService;
 
-    @PostMapping("/start")
+    @PostMapping("/replication/start")
     @Operation(summary = "Запуск репликации по наименованию сервиса")
     @SvoiApiLog(functionName = "StartReplication")
     public ResponseEntity<String> startReplication(
-            @RequestBody ReplicationRequestDto dto,
-            HttpServletRequest httpServletRequest
+            @RequestBody ReplicationRequestDto dto
     ) {
         try {
             SourceConnection source =
