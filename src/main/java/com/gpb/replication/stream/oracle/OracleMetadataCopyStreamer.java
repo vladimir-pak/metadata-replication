@@ -340,6 +340,142 @@ public class OracleMetadataCopyStreamer
         );
     }
 
+    public long streamViews(
+            Connection sourceConnection,
+            Connection targetConnection,
+            String sourceSql,
+            String serviceName,
+            DatabaseReplicationContext database) {
+
+        return copyTables(
+                sourceConnection,
+                targetConnection,
+                DatabaseType.ORACLE,
+                sourceSql,
+                SourceSqlBinder.NONE,
+                rs -> serializeView(
+                        rs,
+                        serviceName,
+                        database
+                )
+        );
+    }
+
+    private byte[] serializeView(
+            ResultSet rs,
+            String serviceName,
+            DatabaseReplicationContext database)
+            throws Exception {
+
+        /*
+        * Порядок обязан совпадать с view.sql.
+        */
+
+        long id =
+                requiredLong(
+                        rs,
+                        "ID"
+                );
+
+        String schemaName =
+                requiredString(
+                        rs,
+                        "SCHEMA_NAME"
+                );
+
+        String tableName =
+                requiredString(
+                        rs,
+                        "TABLE_NAME"
+                );
+
+        String tableType =
+                requiredString(
+                        rs,
+                        "TABLE_TYPE"
+                );
+
+        String description =
+                rs.getString(
+                        "DESCRIPTION"
+                );
+
+        String columnsJson =
+                rs.getString(
+                        "COLUMNS_JSON"
+                );
+
+        String constraintsJson =
+                rs.getString(
+                        "TABLE_CONSTRAINTS_JSON"
+                );
+
+        /*
+        * Оба LONG обязательно читаем последовательно.
+        *
+        * Нельзя сначала определить tableType
+        * и прочитать только один LONG:
+        * при переходе через непрочитанный LONG
+        * Oracle JDBC может закрыть stream.
+        */
+        String regularViewDefinition =
+                rs.getString(
+                        "VIEW_DEFINITION"
+                );
+
+        String materializedViewDefinition =
+                rs.getString(
+                        "MVIEW_DEFINITION"
+                );
+
+        String viewDefinition =
+                "MATERIALIZED_VIEW".equals(tableType)
+                        ? materializedViewDefinition
+                        : regularViewDefinition;
+
+        String fqn =
+                MetadataFqn.table(
+                        serviceName,
+                        database.databaseName(),
+                        schemaName,
+                        tableName
+                );
+
+        String parentFqn =
+                MetadataFqn.schema(
+                        serviceName,
+                        database.databaseName(),
+                        schemaName
+                );
+
+        String data =
+                buildTableData(
+                        tableType,
+                        viewDefinition,
+                        columnsJson,
+                        constraintsJson
+                );
+
+        String hash =
+                MetadataHash.sha256(
+                        description,
+                        data
+                );
+
+        return PostgresCopyCsvEncoder.encode(
+                id,
+                fqn,
+                serviceName,
+                database.databaseName(),
+                schemaName,
+                description,
+                tableName,
+                parentFqn,
+                data,
+                hash
+        );
+    }
+
     private Long getLong(
             ResultSet rs,
             String column) throws Exception {

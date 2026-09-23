@@ -49,11 +49,11 @@ public class OracleReplicationImpl
             OracleMetadataCopyStreamer copyStreamer) {
 
         super(
-            jdbcTemplate,
-            transactionManager,
-            metadataRepository,
-            sourceConnectionFactory,
-            ingestionMetricService
+                jdbcTemplate,
+                transactionManager,
+                metadataRepository,
+                sourceConnectionFactory,
+                ingestionMetricService
         );
 
         this.sqlQueryProvider = sqlQueryProvider;
@@ -64,40 +64,48 @@ public class OracleReplicationImpl
     public DatabaseType getDatabaseType() {
         return DatabaseType.ORACLE;
     }
-    
+
     @Override
     protected void execute(
             SourceConnection source,
             String runId) {
 
-        long started = System.nanoTime();
+        long started =
+                System.nanoTime();
 
         validateSource(source);
 
-        String serviceName = source.getServiceName();
+        String serviceName =
+                source.getServiceName();
 
         String sqlDatabase =
                 sqlQueryProvider.getQuery(
-                    DatabaseType.ORACLE,
-                    MetadataType.DATABASE
+                        DatabaseType.ORACLE,
+                        MetadataType.DATABASE
                 );
 
         String sqlSchema =
                 sqlQueryProvider.getQuery(
-                    DatabaseType.ORACLE,
-                    MetadataType.SCHEMA
+                        DatabaseType.ORACLE,
+                        MetadataType.SCHEMA
                 );
 
         String sqlTable =
                 sqlQueryProvider.getQuery(
-                    DatabaseType.ORACLE,
-                    MetadataType.TABLE
+                        DatabaseType.ORACLE,
+                        MetadataType.TABLE
+                );
+
+        String sqlView =
+                sqlQueryProvider.getQuery(
+                        DatabaseType.ORACLE,
+                        MetadataType.VIEW
                 );
 
         log.info(
-            "Starting Oracle metadata replication. "
-            + "serviceName={}",
-            serviceName
+                "Starting Oracle metadata replication. "
+                        + "serviceName={}",
+                serviceName
         );
 
         try {
@@ -107,135 +115,171 @@ public class OracleReplicationImpl
             long databaseCount;
 
             /*
-            * Первый connection:
-            * resolve database + DATABASE replication.
-            */
+             * Первый connection используется только для:
+             *
+             * 1. определения Oracle database;
+             * 2. DATABASE_REPLICATION.
+             */
             try (
-                Connection sourceConnection =
-                        sourceConnectionFactory.open(source)
+                    Connection sourceConnection =
+                            sourceConnectionFactory
+                                    .open(source)
             ) {
+
                 database =
                         resolveDatabase(
-                            sourceConnection,
-                            sqlDatabase,
-                            serviceName
+                                sourceConnection,
+                                sqlDatabase,
+                                serviceName
                         );
 
                 databaseCount =
                         ingestionMetricService.execute(
                                 runId,
-                                IngestionMetricJob.DATABASE_REPLICATION,
+                                IngestionMetricJob
+                                        .DATABASE_REPLICATION,
                                 counter ->
                                         replicateDatabase(
-                                            sourceConnection,
-                                            sqlDatabase,
-                                            serviceName,
-                                            counter
+                                                sourceConnection,
+                                                sqlDatabase,
+                                                serviceName,
+                                                counter
                                         )
                         );
             }
 
-            boolean databaseSnapshotCommitted = databaseCount == 1;
+            boolean databaseSnapshotCommitted =
+                    databaseCount == 1;
 
             List<String> currentDatabaseNames =
                     List.of(
-                        database.databaseName()
+                            database.databaseName()
                     );
 
+            /*
+             * =====================================================
+             * SCHEMA
+             * =====================================================
+             */
             long schemaCount =
                     ingestionMetricService.execute(
                             runId,
-                            IngestionMetricJob.SCHEMA_REPLICATION,
+                            IngestionMetricJob
+                                    .SCHEMA_REPLICATION,
                             counter -> {
+
                                 if (databaseSnapshotCommitted) {
+
                                     cleanupStaleSchemas(
-                                        serviceName,
-                                        currentDatabaseNames,
-                                        DatabaseType.ORACLE,
-                                        counter
+                                            serviceName,
+                                            currentDatabaseNames,
+                                            DatabaseType.ORACLE,
+                                            counter
                                     );
 
                                 } else {
+
                                     log.warn(
-                                        "Skipping stale SCHEMA cleanup because "
-                                        + "DATABASE snapshot was not committed. "
-                                        + "serviceName={}",
-                                        serviceName
+                                            "Skipping stale SCHEMA cleanup because "
+                                                    + "DATABASE snapshot was not committed. "
+                                                    + "serviceName={}",
+                                            serviceName
                                     );
                                 }
 
                                 return replicateSchemas(
-                                    source,
-                                    sqlSchema,
-                                    serviceName,
-                                    database,
-                                    counter
+                                        source,
+                                        sqlSchema,
+                                        serviceName,
+                                        database,
+                                        counter
                                 );
                             }
                     );
 
+            /*
+             * =====================================================
+             * TABLE + VIEW
+             * =====================================================
+             *
+             * Одна metric job.
+             * Один target DELETE.
+             * Одна target transaction.
+             *
+             * table.sql:
+             *      только REGULAR tables
+             *
+             * view.sql:
+             *      VIEW + MATERIALIZED_VIEW
+             */
             long tableCount =
                     ingestionMetricService.execute(
                             runId,
-                            IngestionMetricJob.TABLE_REPLICATION,
+                            IngestionMetricJob
+                                    .TABLE_REPLICATION,
                             counter -> {
+
                                 if (databaseSnapshotCommitted) {
+
                                     cleanupStaleTables(
-                                        serviceName,
-                                        currentDatabaseNames,
-                                        DatabaseType.ORACLE,
-                                        counter
+                                            serviceName,
+                                            currentDatabaseNames,
+                                            DatabaseType.ORACLE,
+                                            counter
                                     );
 
                                 } else {
 
                                     log.warn(
-                                        "Skipping stale TABLE cleanup because "
-                                        + "DATABASE snapshot was not committed. "
-                                        + "serviceName={}",
-                                        serviceName
+                                            "Skipping stale TABLE cleanup because "
+                                                    + "DATABASE snapshot was not committed. "
+                                                    + "serviceName={}",
+                                            serviceName
                                     );
                                 }
 
-                                return replicateTables(
-                                    source,
-                                    sqlTable,
-                                    serviceName,
-                                    database,
-                                    counter
+                                return replicateTablesAndViews(
+                                        source,
+                                        sqlTable,
+                                        sqlView,
+                                        serviceName,
+                                        database,
+                                        counter
                                 );
                             }
                     );
 
             ReplicationStats stats =
                     new ReplicationStats(
-                        databaseCount,
-                        schemaCount,
-                        tableCount
+                            databaseCount,
+                            schemaCount,
+                            tableCount
                     );
 
-            long elapsedMs = (System.nanoTime() - started) / 1_000_000;
+            long elapsedMs =
+                    (System.nanoTime() - started)
+                            / 1_000_000;
 
             log.info(
-                "Oracle metadata replication completed. "
-                + "serviceName={}, database={}, "
-                + "databases={}, schemas={}, tables={}, "
-                + "elapsedMs={}",
-                serviceName,
-                database.databaseName(),
-                stats.databases(),
-                stats.schemas(),
-                stats.tables(),
-                elapsedMs
+                    "Oracle metadata replication pipeline completed. "
+                            + "serviceName={}, database={}, "
+                            + "databases={}, schemas={}, tablesAndViews={}, "
+                            + "elapsedMs={}",
+                    serviceName,
+                    database.databaseName(),
+                    stats.databases(),
+                    stats.schemas(),
+                    stats.tables(),
+                    elapsedMs
             );
 
         } catch (MetadataReplicationException e) {
 
             log.error(
-                "Oracle metadata replication failed. "
-                + "serviceName={}",
-                serviceName,
-                e
+                    "Oracle metadata replication failed. "
+                            + "serviceName={}",
+                    serviceName,
+                    e
             );
 
             throw e;
@@ -243,15 +287,15 @@ public class OracleReplicationImpl
         } catch (Exception e) {
 
             log.error(
-                "Oracle metadata replication failed. "
-                + "serviceName={}",
-                serviceName,
-                e
+                    "Oracle metadata replication failed. "
+                            + "serviceName={}",
+                    serviceName,
+                    e
             );
 
             throw new MetadataReplicationException(
                     "Oracle metadata replication failed: "
-                    + serviceName,
+                            + serviceName,
                     e
             );
         }
@@ -268,27 +312,28 @@ public class OracleReplicationImpl
             long count =
                     inTargetTransaction(
                             targetConnection -> {
+
                                 metadataRepository
                                         .deleteDatabaseMetadata(
-                                            serviceName,
-                                            DatabaseType.ORACLE
+                                                serviceName,
+                                                DatabaseType.ORACLE
                                         );
 
                                 long copied =
                                         copyStreamer
                                                 .streamDatabases(
-                                                    sourceConnection,
-                                                    targetConnection,
-                                                    sql,
-                                                    serviceName
+                                                        sourceConnection,
+                                                        targetConnection,
+                                                        sql,
+                                                        serviceName
                                                 );
 
                                 if (copied != 1) {
 
                                     throw new MetadataReplicationException(
                                             "Expected exactly one Oracle database, "
-                                            + "but received "
-                                            + copied
+                                                    + "but received "
+                                                    + copied
                                     );
                                 }
 
@@ -299,10 +344,10 @@ public class OracleReplicationImpl
             counter.success(count);
 
             log.info(
-                "Oracle DATABASE metadata committed. "
-                + "serviceName={}, count={}",
-                serviceName,
-                count
+                    "Oracle DATABASE metadata committed. "
+                            + "serviceName={}, count={}",
+                    serviceName,
+                    count
             );
 
             return count;
@@ -312,18 +357,15 @@ public class OracleReplicationImpl
             counter.error();
 
             log.error(
-                "Oracle metadata replication error. "
-                + "entityType=DATABASE, "
-                + "entityName={}, "
-                + "serviceName={}",
-                serviceName,
-                serviceName,
-                e
+                    "Oracle metadata replication error. "
+                            + "entityType=DATABASE, "
+                            + "entityName={}, "
+                            + "serviceName={}",
+                    serviceName,
+                    serviceName,
+                    e
             );
 
-            /*
-            * Не прерываем pipeline.
-            */
             return 0;
         }
     }
@@ -335,11 +377,13 @@ public class OracleReplicationImpl
             DatabaseReplicationContext database,
             MetricCounter counter) {
 
-        String databaseName = database.databaseName();
+        String databaseName =
+                database.databaseName();
 
         try (
                 Connection sourceConnection =
-                        sourceConnectionFactory.open(source)
+                        sourceConnectionFactory
+                                .open(source)
         ) {
 
             long count =
@@ -348,18 +392,18 @@ public class OracleReplicationImpl
 
                                 metadataRepository
                                         .deleteSchemaMetadata(
-                                            serviceName,
-                                            databaseName,
-                                            DatabaseType.ORACLE
+                                                serviceName,
+                                                databaseName,
+                                                DatabaseType.ORACLE
                                         );
 
                                 return copyStreamer
                                         .streamSchemas(
-                                            sourceConnection,
-                                            targetConnection,
-                                            sql,
-                                            serviceName,
-                                            database
+                                                sourceConnection,
+                                                targetConnection,
+                                                sql,
+                                                serviceName,
+                                                database
                                         );
                             }
                     );
@@ -367,11 +411,11 @@ public class OracleReplicationImpl
             counter.success(count);
 
             log.info(
-                "Oracle SCHEMA metadata committed. "
-                + "serviceName={}, database={}, count={}",
-                serviceName,
-                databaseName,
-                count
+                    "Oracle SCHEMA metadata committed. "
+                            + "serviceName={}, database={}, count={}",
+                    serviceName,
+                    databaseName,
+                    count
             );
 
             return count;
@@ -381,83 +425,134 @@ public class OracleReplicationImpl
             counter.error();
 
             log.error(
-                "Oracle metadata replication error. "
-                + "entityType=SCHEMA, "
-                + "entityName={}.*, "
-                + "database={}, "
-                + "serviceName={}",
-                databaseName,
-                databaseName,
-                serviceName,
-                e
+                    "Oracle metadata replication error. "
+                            + "entityType=SCHEMA, "
+                            + "entityName={}.*, "
+                            + "database={}, "
+                            + "serviceName={}",
+                    databaseName,
+                    databaseName,
+                    serviceName,
+                    e
             );
 
             return 0;
         }
     }
 
-    private long replicateTables(
+    private long replicateTablesAndViews(
             SourceConnection source,
-            String sql,
+            String sqlTable,
+            String sqlView,
             String serviceName,
             DatabaseReplicationContext database,
             MetricCounter counter) {
 
-        String databaseName = database.databaseName();
+        String databaseName =
+                database.databaseName();
 
         try (
                 Connection sourceConnection =
-                        sourceConnectionFactory.open(source)
+                        sourceConnectionFactory
+                                .open(source)
         ) {
 
-            long count =
+            TableReplicationResult result =
                     inTargetTransaction(
                             targetConnection -> {
 
+                                /*
+                                 * Snapshot удаляем ОДИН раз.
+                                 *
+                                 * Если table.sql или view.sql упадёт,
+                                 * вся transaction откатится и старый
+                                 * snapshot сохранится.
+                                 */
                                 metadataRepository
                                         .deleteTableMetadata(
-                                            serviceName,
-                                            databaseName,
-                                            DatabaseType.ORACLE
+                                                serviceName,
+                                                databaseName,
+                                                DatabaseType.ORACLE
                                         );
 
-                                return copyStreamer
-                                        .streamTables(
-                                            sourceConnection,
-                                            targetConnection,
-                                            sql,
-                                            serviceName,
-                                            database
-                                        );
+                                long regularTables =
+                                        copyStreamer
+                                                .streamTables(
+                                                        sourceConnection,
+                                                        targetConnection,
+                                                        sqlTable,
+                                                        serviceName,
+                                                        database
+                                                );
+
+                                log.info(
+                                        "Oracle REGULAR TABLE stream completed. "
+                                                + "serviceName={}, database={}, count={}",
+                                        serviceName,
+                                        databaseName,
+                                        regularTables
+                                );
+
+                                long views =
+                                        copyStreamer
+                                                .streamViews(
+                                                        sourceConnection,
+                                                        targetConnection,
+                                                        sqlView,
+                                                        serviceName,
+                                                        database
+                                                );
+
+                                log.info(
+                                        "Oracle VIEW stream completed. "
+                                                + "serviceName={}, database={}, count={}",
+                                        serviceName,
+                                        databaseName,
+                                        views
+                                );
+
+                                return new TableReplicationResult(
+                                        regularTables,
+                                        views
+                                );
                             }
                     );
 
-            counter.success(count);
+            long total =
+                    result.total();
+
+            /*
+             * Здесь inTargetTransaction уже сделал COMMIT.
+             */
+            counter.success(total);
 
             log.info(
-                "Oracle TABLE metadata committed. "
-                + "serviceName={}, database={}, count={}",
-                serviceName,
-                databaseName,
-                count
+                    "Oracle TABLE metadata committed. "
+                            + "serviceName={}, database={}, "
+                            + "regularTables={}, views={}, total={}",
+                    serviceName,
+                    databaseName,
+                    result.regularTables(),
+                    result.views(),
+                    total
             );
 
-            return count;
+            return total;
 
         } catch (Exception e) {
 
             counter.error();
 
             log.error(
-                "Oracle metadata replication error. "
-                + "entityType=TABLE, "
-                + "entityName={}.*, "
-                + "database={}, "
-                + "serviceName={}",
-                databaseName,
-                databaseName,
-                serviceName,
-                e
+                    "Oracle metadata replication error. "
+                            + "entityType=TABLE, "
+                            + "entityName={}.*, "
+                            + "database={}, "
+                            + "serviceName={}",
+                    databaseName,
+                    databaseName,
+                    serviceName,
+                    e
             );
 
             return 0;
@@ -470,52 +565,65 @@ public class OracleReplicationImpl
             String serviceName) {
 
         try (
-            PreparedStatement statement =
-                    sourceConnection.prepareStatement(
-                        sqlDatabase,
-                        ResultSet.TYPE_FORWARD_ONLY,
-                        ResultSet.CONCUR_READ_ONLY
-                    )
+                PreparedStatement statement =
+                        sourceConnection
+                                .prepareStatement(
+                                        sqlDatabase,
+                                        ResultSet.TYPE_FORWARD_ONLY,
+                                        ResultSet.CONCUR_READ_ONLY
+                                )
         ) {
+
             statement.setFetchSize(1);
 
             try (
-                ResultSet rs = statement.executeQuery()
+                    ResultSet rs =
+                            statement.executeQuery()
             ) {
+
                 if (!rs.next()) {
+
                     throw new MetadataReplicationException(
                             "Oracle database metadata not found"
                     );
                 }
 
-                String databaseName = rs.getString("DB_NAME");
+                String databaseName =
+                        rs.getString(
+                                "DB_NAME"
+                        );
 
-                if (databaseName == null || databaseName.isBlank()) {
+                if (databaseName == null
+                        || databaseName.isBlank()) {
+
                     throw new MetadataReplicationException(
                             "Oracle DB_NAME is empty"
                     );
                 }
 
                 if (rs.next()) {
+
                     throw new MetadataReplicationException(
                             "More than one database returned "
-                            + "for Oracle connection"
+                                    + "for Oracle connection"
                     );
                 }
 
                 return new DatabaseReplicationContext(
                         databaseName,
                         MetadataFqn.database(
-                            serviceName,
-                            databaseName
+                                serviceName,
+                                databaseName
                         )
                 );
             }
 
         } catch (Exception e) {
+
             if (e instanceof MetadataReplicationException mre) {
                 throw mre;
             }
+
             throw new MetadataReplicationException(
                     "Failed to resolve Oracle database",
                     e
@@ -527,6 +635,7 @@ public class OracleReplicationImpl
             SourceConnection source) {
 
         if (source == null) {
+
             throw new MetadataReplicationException(
                     "Source connection is null"
             );
@@ -544,13 +653,22 @@ public class OracleReplicationImpl
                 || !DatabaseType.ORACLE
                         .name()
                         .equalsIgnoreCase(
-                            source.getDbType()
+                                source.getDbType()
                         )) {
 
             throw new MetadataReplicationException(
                     "Expected ORACLE connection, actual="
-                    + source.getDbType()
+                            + source.getDbType()
             );
+        }
+    }
+
+    private record TableReplicationResult(
+            long regularTables,
+            long views) {
+
+        long total() {
+            return regularTables + views;
         }
     }
 }
