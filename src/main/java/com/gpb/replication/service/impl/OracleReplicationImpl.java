@@ -102,6 +102,18 @@ public class OracleReplicationImpl
                         MetadataType.VIEW
                 );
 
+        String sqlLongView =
+                sqlQueryProvider.getQuery(
+                        DatabaseType.ORACLE,
+                        MetadataType.VIEW_LONG
+                );
+
+        String sqlMaterializedView =
+                sqlQueryProvider.getQuery(
+                        DatabaseType.ORACLE,
+                        MetadataType.MVIEW
+                );
+
         log.info(
                 "Starting Oracle metadata replication. "
                         + "serviceName={}",
@@ -242,6 +254,8 @@ public class OracleReplicationImpl
                                         source,
                                         sqlTable,
                                         sqlView,
+                                        sqlLongView,
+                                        sqlMaterializedView,
                                         serviceName,
                                         database,
                                         counter
@@ -444,6 +458,8 @@ public class OracleReplicationImpl
             SourceConnection source,
             String sqlTable,
             String sqlView,
+            String sqlViewLong,
+            String sqlMview,
             String serviceName,
             DatabaseReplicationContext database,
             MetricCounter counter) {
@@ -517,9 +533,51 @@ public class OracleReplicationImpl
                                                 / 1_000_000
                                 );
 
+                                long longViewsStarted =
+                                        System.nanoTime();
+
+                                long longViews =
+                                        copyStreamer.streamLongViews(
+                                                sourceConnection,
+                                                targetConnection,
+                                                sqlViewLong,
+                                                serviceName,
+                                                database
+                                        );
+
+                                log.info(
+                                        "Oracle LONG VIEW stream completed. "
+                                                + "count={}, elapsedMs={}",
+                                        longViews,
+                                        (System.nanoTime() - longViewsStarted)
+                                                / 1_000_000
+                                );
+
+                                long mViewsStarted =
+                                        System.nanoTime();
+
+                                long materializedViews =
+                                        copyStreamer.streamMaterializedViews(
+                                                sourceConnection,
+                                                targetConnection,
+                                                sqlMview,
+                                                serviceName,
+                                                database
+                                        );
+
+                                log.info(
+                                        "Oracle M VIEW stream completed. "
+                                                + "count={}, elapsedMs={}",
+                                        materializedViews,
+                                        (System.nanoTime() - mViewsStarted)
+                                                / 1_000_000
+                                );
+
                                 return new TableReplicationResult(
                                         regularTables,
-                                        views
+                                        views,
+                                        longViews,
+                                        materializedViews
                                 );
                             }
                     );
@@ -671,10 +729,12 @@ public class OracleReplicationImpl
 
     private record TableReplicationResult(
             long regularTables,
-            long views) {
+            long views,
+            long longViews,
+            long materializedViews) {
 
         long total() {
-            return regularTables + views;
+            return regularTables + views + longViews + materializedViews;
         }
     }
 }

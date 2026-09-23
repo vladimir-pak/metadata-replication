@@ -6,12 +6,14 @@ WITH allowed_schemas AS (
 
 SELECT
     o.object_id AS ID,
-    v.owner AS SCHEMA_NAME,
-    v.view_name AS TABLE_NAME,
+    mv.owner AS SCHEMA_NAME,
+    mv.mview_name AS TABLE_NAME,
 
-    'VIEW' AS TABLE_TYPE,
+    'MATERIALIZED_VIEW'
+        AS TABLE_TYPE,
 
-    CAST(NULL AS VARCHAR2(1)) AS DESCRIPTION,
+    CAST(NULL AS VARCHAR2(1))
+        AS DESCRIPTION,
 
     col_data.COLUMNS_JSON,
 
@@ -19,22 +21,21 @@ SELECT
         AS TABLE_CONSTRAINTS_JSON,
 
     /*
-     * VARCHAR2(4000), не LONG.
+     * LONG.
      *
-     * Благодаря этому Oracle JDBC может использовать
-     * нормальный row prefetch / fetchSize.
+     * Обязательно последняя колонка ResultSet.
      */
-    v.text_vc AS VIEW_DEFINITION
+    mv.query AS VIEW_DEFINITION
 
-FROM dba_views v
+FROM dba_mviews mv
 
 JOIN allowed_schemas s
-  ON s.username = v.owner
+  ON s.username = mv.owner
 
 JOIN dba_objects o
-  ON o.owner = v.owner
- AND o.object_name = v.view_name
- AND o.object_type = 'VIEW'
+  ON o.owner = mv.owner
+ AND o.object_name = mv.mview_name
+ AND o.object_type = 'MATERIALIZED VIEW'
  AND o.subobject_name IS NULL
 
 OUTER APPLY (
@@ -99,10 +100,6 @@ OUTER APPLY (
 
     FROM dba_tab_columns c
 
-    WHERE c.owner = v.owner
-      AND c.table_name = v.view_name
+    WHERE c.owner = mv.owner
+      AND c.table_name = mv.mview_name
 ) col_data
-
-WHERE v.text_vc IS NOT NULL
-  AND v.text_length <= 4000
-  AND LENGTHB(v.text_vc) = v.text_length

@@ -4,5 +4,7 @@ public enum MetadataType {
     DATABASE,
     SCHEMA,
     TABLE,
-    VIEW
+    VIEW,
+    VIEW_LONG,
+    MVIEW
 }

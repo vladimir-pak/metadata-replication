@@ -19,12 +19,11 @@ SELECT
         AS TABLE_CONSTRAINTS_JSON,
 
     /*
-     * VARCHAR2(4000), не LONG.
+     * LONG.
      *
-     * Благодаря этому Oracle JDBC может использовать
-     * нормальный row prefetch / fetchSize.
+     * Обязательно последняя колонка ResultSet.
      */
-    v.text_vc AS VIEW_DEFINITION
+    v.text AS VIEW_DEFINITION
 
 FROM dba_views v
 
@@ -103,6 +102,7 @@ OUTER APPLY (
       AND c.table_name = v.view_name
 ) col_data
 
-WHERE v.text_vc IS NOT NULL
-  AND v.text_length <= 4000
-  AND LENGTHB(v.text_vc) = v.text_length
+WHERE
+       v.text_vc IS NULL
+    OR v.text_length > 4000
+    OR LENGTHB(v.text_vc) <> v.text_length
