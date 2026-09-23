@@ -194,7 +194,11 @@ public class OracleMetadataCopyStreamer
             DatabaseReplicationContext database)
             throws Exception {
 
-        Long id =
+        /*
+        * ВАЖНО для Oracle LONG:
+        * читать ResultSet строго в порядке SELECT.
+        */
+        long id =
                 requiredLong(
                         rs,
                         "ID"
@@ -212,8 +216,35 @@ public class OracleMetadataCopyStreamer
                         "TABLE_NAME"
                 );
 
+        String tableType =
+                rs.getString(
+                        "TABLE_TYPE"
+                );
+
+        /*
+        * DBA_VIEWS.TEXT = LONG.
+        * Его обязательно читаем ДО любых колонок,
+        * расположенных после него.
+        */
+        String viewDefinition =
+                rs.getString(
+                        "VIEW_DEFINITION"
+                );
+
         String description =
-                rs.getString("DESCRIPTION");
+                rs.getString(
+                        "DESCRIPTION"
+                );
+
+        String columnsJson =
+                rs.getString(
+                        "COLUMNS_JSON"
+                );
+
+        String constraintsJson =
+                rs.getString(
+                        "TABLE_CONSTRAINTS_JSON"
+                );
 
         String fqn =
                 MetadataFqn.table(
@@ -231,7 +262,12 @@ public class OracleMetadataCopyStreamer
                 );
 
         String data =
-                buildTableData(rs);
+                buildTableData(
+                        tableType,
+                        viewDefinition,
+                        columnsJson,
+                        constraintsJson
+                );
 
         String hash =
                 MetadataHash.sha256(
@@ -254,23 +290,23 @@ public class OracleMetadataCopyStreamer
     }
 
     private String buildTableData(
-            ResultSet rs) throws Exception {
+            String tableType,
+            String viewDefinition,
+            String columnsJson,
+            String constraintsJson)
+            throws Exception {
 
         ObjectNode data =
                 objectMapper.createObjectNode();
 
-        String tableType =
-                rs.getString("TABLE_TYPE");
-
-        String viewDefinition =
-                rs.getString(
-                        "VIEW_DEFINITION"
-                );
-
-        data.put(
-                "tableType",
-                tableType
-        );
+        if (tableType == null) {
+            data.putNull("tableType");
+        } else {
+            data.put(
+                    "tableType",
+                    tableType
+            );
+        }
 
         if (viewDefinition == null) {
             data.putNull("viewDefinition");
@@ -283,44 +319,25 @@ public class OracleMetadataCopyStreamer
 
         data.set(
                 "columns",
-                parseArray(
-                        rs.getString(
-                                "COLUMNS_JSON"
-                        )
+                objectMapper.readTree(
+                        columnsJson != null
+                                ? columnsJson
+                                : "[]"
                 )
         );
 
         data.set(
                 "tableConstraints",
-                parseArray(
-                        rs.getString(
-                                "TABLE_CONSTRAINTS_JSON"
-                        )
+                objectMapper.readTree(
+                        constraintsJson != null
+                                ? constraintsJson
+                                : "[]"
                 )
         );
 
-        return objectMapper
-                .writeValueAsString(data);
-    }
-
-    private ArrayNode parseArray(
-            String json) throws Exception {
-
-        if (json == null || json.isBlank()) {
-            return objectMapper.createArrayNode();
-        }
-
-        JsonNode node =
-                objectMapper.readTree(json);
-
-        if (!node.isArray()) {
-            throw new IllegalStateException(
-                    "Expected JSON array, got: "
-                            + node.getNodeType()
-            );
-        }
-
-        return (ArrayNode) node;
+        return objectMapper.writeValueAsString(
+                data
+        );
     }
 
     private Long getLong(

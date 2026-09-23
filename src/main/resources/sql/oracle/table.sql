@@ -5,7 +5,7 @@ WITH allowed_schemas AS (
 )
 
 SELECT
-    o.object_id AS OID,
+    o.object_id AS ID,
     t.owner AS SCHEMA_NAME,
     t.table_name AS TABLE_NAME,
     'REGULAR' AS TABLE_TYPE,
@@ -222,4 +222,4 @@ OUTER APPLY (
 
 ORDER BY
     SCHEMA_NAME,
-    TABLE_NAME;
+    TABLE_NAME

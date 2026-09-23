@@ -1,3 +1,5 @@
+set default_tablespace = '';
+
 CREATE TABLE IF NOT EXISTS public.metadata_ingestion (
     id            BIGSERIAL NOT NULL,
     run_id        UUID NOT NULL,
