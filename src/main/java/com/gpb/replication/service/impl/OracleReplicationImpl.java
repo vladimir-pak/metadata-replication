@@ -475,6 +475,9 @@ public class OracleReplicationImpl
                                                 DatabaseType.ORACLE
                                         );
 
+                                long tablesStarted =
+                                        System.nanoTime();
+
                                 long regularTables =
                                         copyStreamer
                                                 .streamTables(
@@ -487,11 +490,14 @@ public class OracleReplicationImpl
 
                                 log.info(
                                         "Oracle REGULAR TABLE stream completed. "
-                                                + "serviceName={}, database={}, count={}",
-                                        serviceName,
-                                        databaseName,
-                                        regularTables
+                                                + "count={}, elapsedMs={}",
+                                        regularTables,
+                                        (System.nanoTime() - tablesStarted)
+                                                / 1_000_000
                                 );
+
+                                long viewsStarted =
+                                        System.nanoTime();
 
                                 long views =
                                         copyStreamer
@@ -505,10 +511,10 @@ public class OracleReplicationImpl
 
                                 log.info(
                                         "Oracle VIEW stream completed. "
-                                                + "serviceName={}, database={}, count={}",
-                                        serviceName,
-                                        databaseName,
-                                        views
+                                                + "count={}, elapsedMs={}",
+                                        views,
+                                        (System.nanoTime() - viewsStarted)
+                                                / 1_000_000
                                 );
 
                                 return new TableReplicationResult(

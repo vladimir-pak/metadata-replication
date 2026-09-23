@@ -368,7 +368,11 @@ public class OracleMetadataCopyStreamer
             throws Exception {
 
         /*
-        * Порядок обязан совпадать с view.sql.
+        * ВАЖНО:
+        * порядок чтения обязан совпадать с view.sql.
+        *
+        * VIEW_DEFINITION и MVIEW_DEFINITION имеют тип LONG
+        * и должны читаться последними, последовательно.
         */
 
         long id =
@@ -411,18 +415,16 @@ public class OracleMetadataCopyStreamer
                 );
 
         /*
-        * Оба LONG обязательно читаем последовательно.
-        *
-        * Нельзя сначала определить tableType
-        * и прочитать только один LONG:
-        * при переходе через непрочитанный LONG
-        * Oracle JDBC может закрыть stream.
+        * LONG #1
         */
         String regularViewDefinition =
                 rs.getString(
                         "VIEW_DEFINITION"
                 );
 
+        /*
+        * LONG #2
+        */
         String materializedViewDefinition =
                 rs.getString(
                         "MVIEW_DEFINITION"
