@@ -17,7 +17,6 @@ import com.gpb.replication.enums.MetadataType;
 public class SqlQueryProvider {
 
     private final ResourceLoader resourceLoader;
-
     private final Map<String, String> cache = new ConcurrentHashMap<>();
 
     public SqlQueryProvider(ResourceLoader resourceLoader) {
@@ -28,17 +27,34 @@ public class SqlQueryProvider {
             DatabaseType databaseType,
             MetadataType metadataType) {
 
+        return getQuery(
+                databaseType,
+                metadataType.name().toLowerCase()
+        );
+    }
+
+    public String getQuery(
+            DatabaseType databaseType,
+            String queryName) {
+
+        if (queryName == null
+                || !queryName.matches("[A-Za-z0-9_-]+")) {
+
+            throw new IllegalArgumentException(
+                    "Invalid SQL query name: " + queryName
+            );
+        }
+
         String path = String.format(
                 "classpath:sql/%s/%s.sql",
                 databaseType.name().toLowerCase(),
-                metadataType.name().toLowerCase()
+                queryName.toLowerCase()
         );
 
         return cache.computeIfAbsent(path, this::load);
     }
 
     private String load(String path) {
-
         Resource resource = resourceLoader.getResource(path);
 
         try (InputStream inputStream = resource.getInputStream()) {

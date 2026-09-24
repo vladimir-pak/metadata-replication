@@ -14,6 +14,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import com.gpb.replication.connection.SourceJdbcConnectionFactory;
 import com.gpb.replication.dto.SourceConnection;
 import com.gpb.replication.enums.DatabaseType;
+import com.gpb.replication.enums.ReplicationPipeline;
 import com.gpb.replication.exceptions.MetadataReplicationException;
 import com.gpb.replication.metrics.MetricCounter;
 import com.gpb.replication.repository.MetadataRepository;
@@ -34,6 +35,10 @@ public abstract class ReplicationService {
     protected final IngestionMetricService ingestionMetricService;
 
     public abstract DatabaseType getDatabaseType();
+
+    public ReplicationPipeline getPipeline() {
+        return ReplicationPipeline.STANDARD;
+    }
 
     protected ReplicationService(
             JdbcTemplate mainJdbcTemplate,
