@@ -108,7 +108,7 @@ replication:
   oracle:
     pipeline: HYBRID # ALLOWED: STANDARD | HYBRID
 
-    fetch-size: 10000
+    fetch-size: 5000
 
     hybrid:
       # Ровно 4 независимых detail worker-а:
@@ -118,16 +118,54 @@ replication:
       # 4 long views + materialized views
       parallelism: 4
 
+      fetch-size: 10000
+
       query-timeout-seconds: 0
 
       # Защита от случайного DELETE snapshot при проблеме с правами/SQL.
-      allow-empty-object-snapshot: false
+      allow-empty-object-snapshot: true
   postgres:
+    pipeline: HYBRID # ALLOWED: STANDARD | HYBRID
+
     fetch-size: 5000
+
+    hybrid:
+      parallelism: 4
+
+      fetch-size: 10000
+
+      query-timeout-seconds: 0
+
+      # Защита от случайного DELETE snapshot при проблеме с правами/SQL.
+      allow-empty-object-snapshot: true
   mssql:
+    pipeline: HYBRID # ALLOWED: STANDARD | HYBRID
+
     fetch-size: 5000
+
+    hybrid:
+      parallelism: 4
+
+      fetch-size: 10000
+
+      query-timeout-seconds: 0
+
+      # Защита от случайного DELETE snapshot при проблеме с правами/SQL.
+      allow-empty-object-snapshot: true
   sapiq:
+    pipeline: HYBRID # ALLOWED: STANDARD | HYBRID
+
     fetch-size: 5000
+
+    hybrid:
+      parallelism: 4
+
+      fetch-size: 10000
+
+      query-timeout-seconds: 0
+
+      # Защита от случайного DELETE snapshot при проблеме с правами/SQL.
+      allow-empty-object-snapshot: true
 
 logging:
   cef:
