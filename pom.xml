@@ -16,6 +16,7 @@
         <maven.compiler.target>${java.version}</maven.compiler.target>
         <maven.compiler.release>${java.version}</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <oracle.jdbc.version>21.5.0.0</oracle.jdbc.version>
     </properties>
 
     <groupId>com.gpb.replication</groupId>
@@ -84,6 +85,25 @@
         <dependency>
             <groupId>com.oracle.database.jdbc</groupId>
             <artifactId>ojdbc11</artifactId>
+            <version>${oracle.jdbc.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.oracle.database.nls</groupId>
+            <artifactId>orai18n</artifactId>
+            <version>${oracle.jdbc.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.microsoft.sqlserver</groupId>
+            <artifactId>mssql-jdbc</artifactId>
+            <version>12.3.0.jre17-preview</version>
+        </dependency>
+
+        <dependency>
+            <groupId>jdbc.sybase</groupId>
+            <artifactId>jconn4</artifactId>
+            <version>16.0</version>
         </dependency>
 
         <!-- Lombok -->

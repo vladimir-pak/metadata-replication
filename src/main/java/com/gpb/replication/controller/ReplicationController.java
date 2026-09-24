@@ -42,8 +42,14 @@ public class ReplicationController {
     @Value("${replication.oracle.pipeline:HYBRID}")
     private String defaultOraclePipeline;
 
+    @Value("${replication.postgres.pipeline:HYBRID}")
+    private String defaultPostgresPipeline;
+
     @Value("${replication.mssql.pipeline:HYBRID}")
     private String defaultMssqlPipeline;
+
+    @Value("${replication.sapiq.pipeline:HYBRID}")
+    private String defaultSapiqPipeline;
 
     @PostMapping("/replication/start")
     @Operation(summary = "Запуск репликации по наименованию сервиса")
@@ -121,9 +127,27 @@ public class ReplicationController {
                     : ReplicationPipeline.STANDARD;
         }
 
+        if (databaseType == DatabaseType.POSTGRES) {
+            ReplicationPipeline configured =
+                    ReplicationPipeline.from(defaultPostgresPipeline);
+
+            return configured != null
+                    ? configured
+                    : ReplicationPipeline.HYBRID;
+        }
+
         if (databaseType == DatabaseType.MSSQL) {
             ReplicationPipeline configured =
                     ReplicationPipeline.from(defaultMssqlPipeline);
+
+            return configured != null
+                    ? configured
+                    : ReplicationPipeline.HYBRID;
+        }
+
+        if (databaseType == DatabaseType.SAPIQ) {
+            ReplicationPipeline configured =
+                    ReplicationPipeline.from(defaultSapiqPipeline);
 
             return configured != null
                     ? configured
