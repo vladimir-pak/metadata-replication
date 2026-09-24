@@ -162,10 +162,21 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
                 ResultSet rs = statement.executeQuery()
         ) {
             while (rs.next()) {
+                long id = requiredLong(rs, "OID");
+                String schemaName = trimToNull(rs.getString("SCHEMA_NAME"));
+
+                if (schemaName == null) {
+                    log.warn(
+                            "Skipping SAP IQ schema with empty name. oid={}",
+                            id
+                    );
+                    continue;
+                }
+
                 result.add(
                         new SchemaEntry(
-                                requiredLong(rs, "OID"),
-                                requiredString(rs, "SCHEMA_NAME")
+                                id,
+                                schemaName
                         )
                 );
             }
@@ -201,11 +212,28 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
             while (rs.next()) {
                 long tableId = requiredLong(rs, "TABLE_ID");
                 long id = requiredLong(rs, "OID");
-                String schemaName = requiredString(rs, "SCHEMA_NAME");
-                String tableName = requiredString(rs, "TABLE_NAME");
-                String tableType = requiredString(rs, "TABLE_TYPE");
+
+                String schemaName = trimToNull(rs.getString("SCHEMA_NAME"));
+                String tableName = trimToNull(rs.getString("TABLE_NAME"));
+
+                if (schemaName == null || tableName == null) {
+                    log.warn(
+                            "Skipping SAP IQ object with empty schema/table name. "
+                                    + "tableId={}, schema={}, table={}",
+                            tableId,
+                            schemaName,
+                            tableName
+                    );
+                    continue;
+                }
+
+                String tableType = normalizeTableType(
+                        rs.getString("TABLE_TYPE")
+                );
                 String description = rs.getString("DESCRIPTION");
-                String viewDefinition = rs.getString("VIEW_DEFINITION");
+                String viewDefinition = trimToNull(
+                        rs.getString("VIEW_DEFINITION")
+                );
 
                 ObjectMetadata metadata = new ObjectMetadata(
                         tableId,
@@ -258,9 +286,24 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
             while (rs.next()) {
                 long tableId = requiredLong(rs, "TABLE_ID");
                 long id = requiredLong(rs, "ID");
-                String schemaName = requiredString(rs, "SCHEMA_NAME");
-                String tableName = requiredString(rs, "TABLE_NAME");
-                String tableType = requiredString(rs, "TABLE_TYPE");
+
+                String schemaName = trimToNull(rs.getString("SCHEMA_NAME"));
+                String tableName = trimToNull(rs.getString("TABLE_NAME"));
+
+                if (schemaName == null || tableName == null) {
+                    log.warn(
+                            "Skipping SAP IQ object with empty schema/table name. "
+                                    + "tableId={}, schema={}, table={}",
+                            tableId,
+                            schemaName,
+                            tableName
+                    );
+                    continue;
+                }
+
+                String tableType = normalizeTableType(
+                        rs.getString("TABLE_TYPE")
+                );
                 String description = rs.getString("DESCRIPTION");
 
                 ObjectMetadata metadata = new ObjectMetadata(
@@ -386,16 +429,48 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
                         continue;
                     }
 
-                    String columnName = requiredString(rs, "COLUMN_NAME");
-                    String dataType = requiredString(rs, "DATA_TYPE");
-                    String dataTypeDisplay = rs.getString("DATA_TYPE_DISPLAY");
-                    Long dataLength = getLong(rs, "DATA_LENGTH");
-                    Integer ordinalPosition = getInteger(rs, "ORDINAL_POSITION");
-                    String columnConstraint = rs.getString("COLUMN_CONSTRAINT");
+                    int ordinalPosition = rs.getInt("ORDINAL_POSITION");
+
+                    String columnName = trimToNull(
+                            rs.getString("COLUMN_NAME")
+                    );
+
+                    if (columnName == null) {
+                        skipped++;
+
+                        log.warn(
+                                "Skipping SAP IQ column with empty name. "
+                                        + "stage={}, tableId={}, schema={}, table={}, "
+                                        + "ordinalPosition={}",
+                                stage,
+                                tableId,
+                                currentObject.schemaName,
+                                currentObject.tableName,
+                                ordinalPosition
+                        );
+
+                        continue;
+                    }
+
+                    String dataType = trimToNull(
+                            rs.getString("DATA_TYPE")
+                    );
+                    String dataTypeDisplay = trimToNull(
+                            rs.getString("DATA_TYPE_DISPLAY")
+                    );
+                    Integer dataLength = getInteger(rs, "DATA_LENGTH");
+                    String columnConstraint = trimToNull(
+                            rs.getString("COLUMN_CONSTRAINT")
+                    );
                     String description = rs.getString("DESCRIPTION");
 
                     ObjectNode column = objectMapper.createObjectNode();
-                    column.put("name", columnName);
+
+                    /*
+                     * Field order intentionally matches the legacy SAP IQ
+                     * replication service to keep generated JSON stable.
+                     */
+                    column.put("ordinalPosition", ordinalPosition);
                     column.put(
                             "fqn",
                             MetadataFqn.table(
@@ -405,7 +480,13 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
                                     currentObject.tableName
                             ) + "." + columnName
                     );
-                    column.put("dataType", dataType);
+                    column.put("name", columnName);
+
+                    if (dataType == null) {
+                        column.putNull("dataType");
+                    } else {
+                        column.put("dataType", dataType);
+                    }
 
                     if (dataTypeDisplay == null) {
                         column.putNull("dataTypeDisplay");
@@ -419,21 +500,16 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
                         column.put("dataLength", dataLength);
                     }
 
-                    column.put(
-                            "description",
-                            description != null ? description : ""
-                    );
-
-                    if (ordinalPosition == null) {
-                        column.putNull("ordinalPosition");
-                    } else {
-                        column.put("ordinalPosition", ordinalPosition);
-                    }
-
-                    if (columnConstraint == null || columnConstraint.isBlank()) {
+                    if (columnConstraint == null) {
                         column.putNull("constraint");
                     } else {
                         column.put("constraint", columnConstraint);
+                    }
+
+                    if (description == null) {
+                        column.putNull("description");
+                    } else {
+                        column.put("description", description);
                     }
 
                     currentColumns.add(column);
@@ -463,13 +539,8 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
         long applied = 0;
         long skipped = 0;
 
-        Long currentTableId = null;
-        ObjectMetadata currentObject = null;
-        ArrayNode currentConstraints = null;
-
-        Long currentIndexId = null;
-        ObjectNode currentConstraint = null;
-        ArrayNode currentConstraintColumns = null;
+        LinkedHashMap<ConstraintKey, ConstraintBuilder> builders =
+                new LinkedHashMap<>();
 
         try (
                 PreparedStatement statement = prepare(connection, sql);
@@ -481,57 +552,132 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
                 long tableId = requiredLong(rs, "TABLE_ID");
                 long indexId = requiredLong(rs, "INDEX_ID");
 
-                if (currentTableId == null || tableId != currentTableId) {
-                    if (currentConstraint != null && currentConstraints != null) {
-                        currentConstraints.add(currentConstraint);
-                    }
-                    flushConstraints(currentObject, currentConstraints);
-
-                    currentTableId = tableId;
-                    currentObject = snapshot.find(tableId);
-                    currentConstraints = currentObject != null
-                            ? objectMapper.createArrayNode()
-                            : null;
-
-                    currentIndexId = null;
-                    currentConstraint = null;
-                    currentConstraintColumns = null;
-                }
-
-                if (currentObject == null) {
+                ObjectMetadata object = snapshot.find(tableId);
+                if (object == null) {
                     skipped++;
                     continue;
                 }
 
-                if (currentIndexId == null || indexId != currentIndexId) {
-                    if (currentConstraint != null) {
-                        currentConstraints.add(currentConstraint);
-                    }
+                String constraintType = trimToNull(
+                        rs.getString("CONSTRAINT_TYPE")
+                );
+                String columnName = trimToNull(
+                        rs.getString("COLUMN_NAME")
+                );
 
-                    currentIndexId = indexId;
-                    currentConstraint = objectMapper.createObjectNode();
-                    currentConstraint.put(
-                            "constraintType",
-                            requiredString(rs, "CONSTRAINT_TYPE")
-                    );
-                    currentConstraintColumns = currentConstraint.putArray("columns");
-                }
+                ConstraintKey key = new ConstraintKey(
+                        tableId,
+                        indexId
+                );
 
-                String columnName = rs.getString("COLUMN_NAME");
-                if (columnName != null && !columnName.isBlank()) {
-                    currentConstraintColumns.add(columnName);
+                ConstraintBuilder builder =
+                        builders.computeIfAbsent(
+                                key,
+                                ignored -> new ConstraintBuilder(
+                                        tableId,
+                                        constraintType
+                                )
+                        );
+
+                if (columnName != null) {
+                    builder.columns.add(columnName);
                 }
 
                 applied++;
             }
 
-            if (currentConstraint != null && currentConstraints != null) {
-                currentConstraints.add(currentConstraint);
+            /*
+             * The legacy service de-duplicates constraints by
+             * (tableId, normalized type, ordered columns).
+             */
+            LinkedHashMap<ConstraintDedupKey, ConstraintValue> deduplicated =
+                    new LinkedHashMap<>();
+
+            for (ConstraintBuilder builder : builders.values()) {
+                String constraintType =
+                        trimToNull(builder.constraintType);
+
+                if (constraintType == null) {
+                    constraintType = "OTHER";
+                }
+
+                List<String> columns =
+                        builder.columns.stream()
+                                .map(this::trimToNull)
+                                .filter(column ->
+                                        column != null
+                                                && !column.isBlank())
+                                .toList();
+
+                ConstraintDedupKey dedupKey =
+                        new ConstraintDedupKey(
+                                builder.tableId,
+                                constraintType,
+                                columns
+                        );
+
+                deduplicated.putIfAbsent(
+                        dedupKey,
+                        new ConstraintValue(
+                                builder.tableId,
+                                constraintType,
+                                columns
+                        )
+                );
             }
-            flushConstraints(currentObject, currentConstraints);
+
+            LinkedHashMap<Long, ArrayNode> constraintsByTable =
+                    new LinkedHashMap<>();
+
+            for (ConstraintValue constraint : deduplicated.values()) {
+                ObjectMetadata object =
+                        snapshot.find(constraint.tableId());
+
+                if (object == null) {
+                    continue;
+                }
+
+                ArrayNode constraints =
+                        constraintsByTable.computeIfAbsent(
+                                constraint.tableId(),
+                                ignored -> objectMapper.createArrayNode()
+                        );
+
+                ObjectNode constraintNode =
+                        constraints.addObject();
+
+                ArrayNode constraintColumns =
+                        constraintNode.putArray("columns");
+
+                for (String columnName : constraint.columns()) {
+                    constraintColumns.add(columnName);
+                }
+
+                constraintNode.put(
+                        "constraintType",
+                        constraint.constraintType()
+                );
+            }
+
+            for (Map.Entry<Long, ArrayNode> entry
+                    : constraintsByTable.entrySet()) {
+
+                ObjectMetadata object =
+                        snapshot.find(entry.getKey());
+
+                flushConstraints(
+                        object,
+                        entry.getValue()
+                );
+            }
 
             return logResult(
-                    new LoadResult("CONSTRAINTS", rows, applied, skipped),
+                    new LoadResult(
+                            "CONSTRAINTS",
+                            rows,
+                            applied,
+                            skipped
+                    ),
                     started
             );
 
@@ -567,7 +713,9 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
                     continue;
                 }
 
-                object.viewDefinition = rs.getString("VIEW_DEFINITION");
+                object.viewDefinition = trimToNull(
+                        rs.getString("VIEW_DEFINITION")
+                );
                 applied++;
             }
 
@@ -667,12 +815,16 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
         );
 
         ObjectNode data = objectMapper.createObjectNode();
-        data.put("tableType", object.tableType);
 
-        if (object.viewDefinition == null) {
+        String tableType = normalizeTableType(object.tableType);
+        data.put("tableType", tableType);
+
+        String viewDefinition = trimToNull(object.viewDefinition);
+
+        if (viewDefinition == null) {
             data.putNull("viewDefinition");
         } else {
-            data.put("viewDefinition", object.viewDefinition);
+            data.put("viewDefinition", viewDefinition);
         }
 
         data.set(
@@ -846,13 +998,41 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
             String column)
             throws SQLException {
 
-        String value = rs.getString(column);
-        if (value == null || value.isBlank()) {
+        String value = trimToNull(
+                rs.getString(column)
+        );
+
+        if (value == null) {
             throw new IllegalStateException(
                     "Required column is empty: " + column
             );
         }
+
         return value;
+    }
+
+    private String trimToNull(
+            String value) {
+
+        if (value == null) {
+            return null;
+        }
+
+        String trimmed = value.trim();
+
+        return trimmed.isEmpty()
+                ? null
+                : trimmed;
+    }
+
+    private String normalizeTableType(
+            String tableType) {
+
+        String normalized = trimToNull(tableType);
+
+        return normalized == null
+                ? "OTHER"
+                : normalized;
     }
 
     private LoadResult logResult(
@@ -902,6 +1082,38 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
     @FunctionalInterface
     private interface RowEncoder<T> {
         byte[] encode(T value) throws Exception;
+    }
+
+    private record ConstraintKey(
+            long tableId,
+            long indexId) {
+    }
+
+    private record ConstraintDedupKey(
+            long tableId,
+            String constraintType,
+            List<String> columns) {
+    }
+
+    private record ConstraintValue(
+            long tableId,
+            String constraintType,
+            List<String> columns) {
+    }
+
+    private static final class ConstraintBuilder {
+
+        private final long tableId;
+        private final String constraintType;
+        private final List<String> columns = new ArrayList<>();
+
+        private ConstraintBuilder(
+                long tableId,
+                String constraintType) {
+
+            this.tableId = tableId;
+            this.constraintType = constraintType;
+        }
     }
 
     private static final class ObjectMetadata {
