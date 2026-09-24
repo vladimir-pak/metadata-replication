@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gpb.replication.dto.DatabaseReplicationContext;
+import com.gpb.replication.exclusion.MetadataExclusionRules;
 import com.gpb.replication.exceptions.MetadataReplicationException;
 import com.gpb.replication.stream.PostgresCopyCsvEncoder;
 import com.gpb.replication.utils.MetadataFqn;
@@ -76,19 +77,38 @@ public class OracleHybridMetadataCopyStreamer {
 
     public Snapshot loadObjects(
             Connection connection,
-            String sql) {
+            String sql,
+            MetadataExclusionRules exclusionRules) {
 
         long started = System.nanoTime();
-        LinkedHashMap<ObjectKey, ObjectMetadata> objects = new LinkedHashMap<>();
+        long rows = 0;
+        long excludedBySchema = 0;
+        long excludedByTable = 0;
+
+        LinkedHashMap<ObjectKey, ObjectMetadata> objects =
+                new LinkedHashMap<>();
 
         try (
                 PreparedStatement statement = prepare(connection, sql);
                 ResultSet rs = statement.executeQuery()
         ) {
             while (rs.next()) {
+                rows++;
+
                 long id = requiredLong(rs, "ID");
                 String schemaName = requiredString(rs, "SCHEMA_NAME");
                 String tableName = requiredString(rs, "TABLE_NAME");
+
+                if (exclusionRules.isSchemaExcluded(schemaName)) {
+                    excludedBySchema++;
+                    continue;
+                }
+
+                if (exclusionRules.isTableExcluded(tableName)) {
+                    excludedByTable++;
+                    continue;
+                }
+
                 String tableType = requiredString(rs, "TABLE_TYPE");
 
                 ObjectKey key = new ObjectKey(schemaName, tableName);
@@ -116,8 +136,13 @@ public class OracleHybridMetadataCopyStreamer {
             );
 
             log.info(
-                    "Oracle HYBRID object catalog loaded. objects={}, elapsedMs={}",
+                    "Oracle HYBRID object catalog loaded. "
+                            + "rows={}, objects={}, excludedBySchema={}, "
+                            + "excludedByTable={}, elapsedMs={}",
+                    rows,
                     snapshot.size(),
+                    excludedBySchema,
+                    excludedByTable,
                     elapsedMs(started)
             );
 

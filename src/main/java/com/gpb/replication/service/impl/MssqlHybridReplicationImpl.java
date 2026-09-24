@@ -26,6 +26,8 @@ import com.gpb.replication.dto.SourceConnection;
 import com.gpb.replication.enums.DatabaseType;
 import com.gpb.replication.enums.ReplicationPipeline;
 import com.gpb.replication.exceptions.MetadataReplicationException;
+import com.gpb.replication.exclusion.MetadataExclusionProvider;
+import com.gpb.replication.exclusion.MetadataExclusionRules;
 import com.gpb.replication.metrics.MetricCounter;
 import com.gpb.replication.metrics.enums.IngestionMetricJob;
 import com.gpb.replication.repository.MetadataRepository;
@@ -55,6 +57,7 @@ public class MssqlHybridReplicationImpl
     private final MssqlHybridMetadataCopyStreamer hybridCopyStreamer;
     private final int parallelism;
     private final boolean allowEmptyObjectSnapshot;
+    private final MetadataExclusionProvider metadataExclusionProvider;
 
     public MssqlHybridReplicationImpl(
             SqlQueryProvider sqlQueryProvider,
@@ -69,7 +72,8 @@ public class MssqlHybridReplicationImpl
             @Value("${replication.mssql.hybrid.parallelism:4}")
             int parallelism,
             @Value("${replication.mssql.hybrid.allow-empty-object-snapshot:false}")
-            boolean allowEmptyObjectSnapshot) {
+            boolean allowEmptyObjectSnapshot,
+            MetadataExclusionProvider metadataExclusionProvider) {
 
         super(
                 jdbcTemplate,
@@ -83,6 +87,7 @@ public class MssqlHybridReplicationImpl
         this.hybridCopyStreamer = hybridCopyStreamer;
         this.parallelism = Math.max(1, Math.min(parallelism, DETAIL_WORKERS));
         this.allowEmptyObjectSnapshot = allowEmptyObjectSnapshot;
+        this.metadataExclusionProvider = metadataExclusionProvider;
     }
 
     @Override
@@ -102,6 +107,11 @@ public class MssqlHybridReplicationImpl
 
         long started = System.nanoTime();
         validateSource(source);
+
+        MetadataExclusionRules exclusionRules =
+                metadataExclusionProvider.load(
+                        DatabaseType.MSSQL
+                );
 
         String serviceName = source.getServiceName();
 
@@ -202,7 +212,8 @@ public class MssqlHybridReplicationImpl
                                 sqlSchemas,
                                 serviceName,
                                 contexts,
-                                counter
+                                counter,
+                                exclusionRules
                         );
                     }
             );
@@ -235,7 +246,8 @@ public class MssqlHybridReplicationImpl
                                 sqlViews,
                                 serviceName,
                                 contexts,
-                                counter
+                                counter,
+                                exclusionRules
                         );
                     }
             );
@@ -337,7 +349,8 @@ public class MssqlHybridReplicationImpl
             String sqlSchemas,
             String serviceName,
             List<DatabaseReplicationContext> databases,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         long total = 0;
 
@@ -353,7 +366,8 @@ public class MssqlHybridReplicationImpl
                 ) {
                     schemas = hybridCopyStreamer.loadSchemas(
                             sourceConnection,
-                            sqlSchemas
+                            sqlSchemas,
+                            exclusionRules
                     );
                 }
 
@@ -430,7 +444,8 @@ public class MssqlHybridReplicationImpl
             String sqlViews,
             String serviceName,
             List<DatabaseReplicationContext> databases,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         long total = 0;
 
@@ -447,7 +462,8 @@ public class MssqlHybridReplicationImpl
                 ) {
                     snapshot = hybridCopyStreamer.loadObjects(
                             sourceConnection,
-                            sqlObjects
+                            sqlObjects,
+                            exclusionRules
                     );
                 }
 

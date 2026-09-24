@@ -20,6 +20,8 @@ import com.gpb.replication.dto.SourceConnection;
 import com.gpb.replication.enums.DatabaseType;
 import com.gpb.replication.enums.MetadataType;
 import com.gpb.replication.exceptions.MetadataReplicationException;
+import com.gpb.replication.exclusion.MetadataExclusionProvider;
+import com.gpb.replication.exclusion.MetadataExclusionRules;
 import com.gpb.replication.metrics.MetricCounter;
 import com.gpb.replication.metrics.enums.IngestionMetricJob;
 import com.gpb.replication.repository.MetadataRepository;
@@ -39,6 +41,7 @@ public class PostgresReplicationImpl extends ReplicationService {
     private final SqlQueryProvider sqlQueryProvider;
 
     private final PostgresMetadataCopyStreamer copyStreamer;
+    private final MetadataExclusionProvider metadataExclusionProvider;
 
     public PostgresReplicationImpl(
             SqlQueryProvider sqlQueryProvider,
@@ -49,7 +52,8 @@ public class PostgresReplicationImpl extends ReplicationService {
             MetadataRepository metadataRepository,
             SourceJdbcConnectionFactory sourceConnectionFactory,
             IngestionMetricService ingestionMetricService,
-            PostgresMetadataCopyStreamer copyStreamer) {
+            PostgresMetadataCopyStreamer copyStreamer,
+            MetadataExclusionProvider metadataExclusionProvider) {
 
         super(
             jdbcTemplate,
@@ -62,6 +66,7 @@ public class PostgresReplicationImpl extends ReplicationService {
         this.sqlQueryProvider = sqlQueryProvider;
 
         this.copyStreamer = copyStreamer;
+        this.metadataExclusionProvider = metadataExclusionProvider;
     }
 
     @Override
@@ -75,6 +80,11 @@ public class PostgresReplicationImpl extends ReplicationService {
             String runId) {
 
         validateSource(source);
+
+        MetadataExclusionRules exclusionRules =
+                metadataExclusionProvider.load(
+                        DatabaseType.POSTGRES
+                );
 
         String serviceName = source.getServiceName();
 
@@ -216,7 +226,8 @@ public class PostgresReplicationImpl extends ReplicationService {
                                 sqlSchema,
                                 serviceName,
                                 databases,
-                                counter
+                                counter,
+                                exclusionRules
                             );
                         }
                 );
@@ -251,7 +262,8 @@ public class PostgresReplicationImpl extends ReplicationService {
                                 sqlTable,
                                 serviceName,
                                 databases,
-                                counter
+                                counter,
+                                exclusionRules
                             );
                         }
                 );
@@ -354,7 +366,8 @@ public class PostgresReplicationImpl extends ReplicationService {
             String sql,
             String serviceName,
             List<DatabaseReplicationContext> databases,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         long total = 0;
 
@@ -405,7 +418,8 @@ public class PostgresReplicationImpl extends ReplicationService {
                                                 targetConnection,
                                                 sql,
                                                 serviceName,
-                                                database
+                                                database,
+                                                exclusionRules
                                             );
                                 }
                         );
@@ -456,7 +470,8 @@ public class PostgresReplicationImpl extends ReplicationService {
             String sql,
             String serviceName,
             List<DatabaseReplicationContext> databases,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         long total = 0;
 
@@ -494,7 +509,8 @@ public class PostgresReplicationImpl extends ReplicationService {
                                                 targetConnection,
                                                 sql,
                                                 serviceName,
-                                                database
+                                                database,
+                                                exclusionRules
                                             );
                                 }
                         );

@@ -155,14 +155,31 @@ public abstract class AbstractMetadataCopyStreamer {
                                     .getCopyAPI()
                                     .copyIn(copySql);
 
+                    long sourceRows = 0;
                     long streamedRows = 0;
+                    long skippedRows = 0;
 
                     try {
 
                         while (resultSet.next()) {
 
+                            sourceRows++;
+
                             byte[] row =
                                     serializer.serialize(resultSet);
+
+                            /*
+                             * null from serializer means that the source row
+                             * was intentionally excluded from the snapshot.
+                             *
+                             * This keeps STANDARD streaming zero-copy:
+                             * no intermediate collection is required just
+                             * to apply schema/table exclusion rules.
+                             */
+                            if (row == null) {
+                                skippedRows++;
+                                continue;
+                            }
 
                             copyIn.writeToCopy(
                                     row,
@@ -181,9 +198,12 @@ public abstract class AbstractMetadataCopyStreamer {
 
                         log.info(
                                 "{} metadata COPY completed: "
-                                        + "streamedRows={}, copiedRows={}, elapsedMs={}",
+                                        + "sourceRows={}, streamedRows={}, "
+                                        + "skippedRows={}, copiedRows={}, elapsedMs={}",
                                 entityType,
+                                sourceRows,
                                 streamedRows,
+                                skippedRows,
                                 copiedRows,
                                 elapsedMs
                         );

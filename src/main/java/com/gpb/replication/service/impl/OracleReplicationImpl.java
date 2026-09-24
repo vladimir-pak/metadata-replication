@@ -17,6 +17,8 @@ import com.gpb.replication.dto.SourceConnection;
 import com.gpb.replication.enums.DatabaseType;
 import com.gpb.replication.enums.MetadataType;
 import com.gpb.replication.exceptions.MetadataReplicationException;
+import com.gpb.replication.exclusion.MetadataExclusionProvider;
+import com.gpb.replication.exclusion.MetadataExclusionRules;
 import com.gpb.replication.metrics.MetricCounter;
 import com.gpb.replication.metrics.enums.IngestionMetricJob;
 import com.gpb.replication.repository.MetadataRepository;
@@ -36,6 +38,7 @@ public class OracleReplicationImpl
     private final SqlQueryProvider sqlQueryProvider;
 
     private final OracleMetadataCopyStreamer copyStreamer;
+    private final MetadataExclusionProvider metadataExclusionProvider;
 
     public OracleReplicationImpl(
             SqlQueryProvider sqlQueryProvider,
@@ -46,7 +49,8 @@ public class OracleReplicationImpl
             MetadataRepository metadataRepository,
             SourceJdbcConnectionFactory sourceConnectionFactory,
             IngestionMetricService ingestionMetricService,
-            OracleMetadataCopyStreamer copyStreamer) {
+            OracleMetadataCopyStreamer copyStreamer,
+            MetadataExclusionProvider metadataExclusionProvider) {
 
         super(
                 jdbcTemplate,
@@ -58,6 +62,7 @@ public class OracleReplicationImpl
 
         this.sqlQueryProvider = sqlQueryProvider;
         this.copyStreamer = copyStreamer;
+        this.metadataExclusionProvider = metadataExclusionProvider;
     }
 
     @Override
@@ -74,6 +79,11 @@ public class OracleReplicationImpl
                 System.nanoTime();
 
         validateSource(source);
+
+        MetadataExclusionRules exclusionRules =
+                metadataExclusionProvider.load(
+                        DatabaseType.ORACLE
+                );
 
         String serviceName =
                 source.getServiceName();
@@ -204,7 +214,8 @@ public class OracleReplicationImpl
                                         sqlSchema,
                                         serviceName,
                                         database,
-                                        counter
+                                        counter,
+                                        exclusionRules
                                 );
                             }
                     );
@@ -258,7 +269,8 @@ public class OracleReplicationImpl
                                         sqlMaterializedView,
                                         serviceName,
                                         database,
-                                        counter
+                                        counter,
+                                        exclusionRules
                                 );
                             }
                     );
@@ -389,7 +401,8 @@ public class OracleReplicationImpl
             String sql,
             String serviceName,
             DatabaseReplicationContext database,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         String databaseName =
                 database.databaseName();
@@ -417,7 +430,8 @@ public class OracleReplicationImpl
                                                 targetConnection,
                                                 sql,
                                                 serviceName,
-                                                database
+                                                database,
+                                                exclusionRules
                                         );
                             }
                     );
@@ -462,7 +476,8 @@ public class OracleReplicationImpl
             String sqlMview,
             String serviceName,
             DatabaseReplicationContext database,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         String databaseName =
                 database.databaseName();
@@ -501,7 +516,8 @@ public class OracleReplicationImpl
                                                         targetConnection,
                                                         sqlTable,
                                                         serviceName,
-                                                        database
+                                                        database,
+                                                        exclusionRules
                                                 );
 
                                 log.info(
@@ -522,7 +538,8 @@ public class OracleReplicationImpl
                                                         targetConnection,
                                                         sqlView,
                                                         serviceName,
-                                                        database
+                                                        database,
+                                                        exclusionRules
                                                 );
 
                                 log.info(
@@ -542,7 +559,8 @@ public class OracleReplicationImpl
                                                 targetConnection,
                                                 sqlViewLong,
                                                 serviceName,
-                                                database
+                                                database,
+                                                exclusionRules
                                         );
 
                                 log.info(
@@ -562,7 +580,8 @@ public class OracleReplicationImpl
                                                 targetConnection,
                                                 sqlMview,
                                                 serviceName,
-                                                database
+                                                database,
+                                                exclusionRules
                                         );
 
                                 log.info(

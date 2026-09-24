@@ -26,6 +26,8 @@ import com.gpb.replication.dto.SourceConnection;
 import com.gpb.replication.enums.DatabaseType;
 import com.gpb.replication.enums.ReplicationPipeline;
 import com.gpb.replication.exceptions.MetadataReplicationException;
+import com.gpb.replication.exclusion.MetadataExclusionProvider;
+import com.gpb.replication.exclusion.MetadataExclusionRules;
 import com.gpb.replication.metrics.MetricCounter;
 import com.gpb.replication.metrics.enums.IngestionMetricJob;
 import com.gpb.replication.repository.MetadataRepository;
@@ -55,6 +57,7 @@ public class PostgresHybridReplicationImpl
     private final PostgresHybridMetadataCopyStreamer hybridCopyStreamer;
     private final int parallelism;
     private final boolean allowEmptyObjectSnapshot;
+    private final MetadataExclusionProvider metadataExclusionProvider;
 
     public PostgresHybridReplicationImpl(
             SqlQueryProvider sqlQueryProvider,
@@ -69,7 +72,8 @@ public class PostgresHybridReplicationImpl
             @Value("${replication.postgres.hybrid.parallelism:4}")
             int parallelism,
             @Value("${replication.postgres.hybrid.allow-empty-object-snapshot:false}")
-            boolean allowEmptyObjectSnapshot) {
+            boolean allowEmptyObjectSnapshot,
+            MetadataExclusionProvider metadataExclusionProvider) {
 
         super(
                 jdbcTemplate,
@@ -86,6 +90,7 @@ public class PostgresHybridReplicationImpl
                 Math.min(parallelism, DETAIL_WORKERS)
         );
         this.allowEmptyObjectSnapshot = allowEmptyObjectSnapshot;
+        this.metadataExclusionProvider = metadataExclusionProvider;
     }
 
     @Override
@@ -105,6 +110,11 @@ public class PostgresHybridReplicationImpl
 
         long started = System.nanoTime();
         validateSource(source);
+
+        MetadataExclusionRules exclusionRules =
+                metadataExclusionProvider.load(
+                        DatabaseType.POSTGRES
+                );
 
         String serviceName = source.getServiceName();
 
@@ -213,7 +223,8 @@ public class PostgresHybridReplicationImpl
                                 sqlSchemas,
                                 serviceName,
                                 contexts,
-                                counter
+                                counter,
+                                exclusionRules
                         );
                     }
             );
@@ -246,7 +257,8 @@ public class PostgresHybridReplicationImpl
                                 sqlViews,
                                 serviceName,
                                 contexts,
-                                counter
+                                counter,
+                                exclusionRules
                         );
                     }
             );
@@ -353,7 +365,8 @@ public class PostgresHybridReplicationImpl
             String sqlSchemas,
             String serviceName,
             List<DatabaseReplicationContext> databases,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         long total = 0;
 
@@ -372,7 +385,8 @@ public class PostgresHybridReplicationImpl
                 ) {
                     schemas = hybridCopyStreamer.loadSchemas(
                             sourceConnection,
-                            sqlSchemas
+                            sqlSchemas,
+                            exclusionRules
                     );
                 }
 
@@ -450,7 +464,8 @@ public class PostgresHybridReplicationImpl
             String sqlViews,
             String serviceName,
             List<DatabaseReplicationContext> databases,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         long total = 0;
 
@@ -474,7 +489,8 @@ public class PostgresHybridReplicationImpl
                 ) {
                     snapshot = hybridCopyStreamer.loadObjects(
                             sourceConnection,
-                            sqlObjects
+                            sqlObjects,
+                            exclusionRules
                     );
                 }
 

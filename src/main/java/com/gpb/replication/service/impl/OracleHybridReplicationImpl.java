@@ -26,6 +26,8 @@ import com.gpb.replication.enums.DatabaseType;
 import com.gpb.replication.enums.MetadataType;
 import com.gpb.replication.enums.ReplicationPipeline;
 import com.gpb.replication.exceptions.MetadataReplicationException;
+import com.gpb.replication.exclusion.MetadataExclusionProvider;
+import com.gpb.replication.exclusion.MetadataExclusionRules;
 import com.gpb.replication.metrics.MetricCounter;
 import com.gpb.replication.metrics.enums.IngestionMetricJob;
 import com.gpb.replication.repository.MetadataRepository;
@@ -53,6 +55,7 @@ public class OracleHybridReplicationImpl
     private final OracleHybridMetadataCopyStreamer hybridCopyStreamer;
     private final int parallelism;
     private final boolean allowEmptyObjectSnapshot;
+    private final MetadataExclusionProvider metadataExclusionProvider;
 
     public OracleHybridReplicationImpl(
             SqlQueryProvider sqlQueryProvider,
@@ -68,7 +71,8 @@ public class OracleHybridReplicationImpl
             @Value("${replication.oracle.hybrid.parallelism:4}")
             int parallelism,
             @Value("${replication.oracle.hybrid.allow-empty-object-snapshot:false}")
-            boolean allowEmptyObjectSnapshot) {
+            boolean allowEmptyObjectSnapshot,
+            MetadataExclusionProvider metadataExclusionProvider) {
 
         super(
                 jdbcTemplate,
@@ -83,6 +87,7 @@ public class OracleHybridReplicationImpl
         this.hybridCopyStreamer = hybridCopyStreamer;
         this.parallelism = Math.max(1, Math.min(parallelism, DETAIL_WORKERS));
         this.allowEmptyObjectSnapshot = allowEmptyObjectSnapshot;
+        this.metadataExclusionProvider = metadataExclusionProvider;
     }
 
     @Override
@@ -102,6 +107,11 @@ public class OracleHybridReplicationImpl
 
         long started = System.nanoTime();
         validateSource(source);
+
+        MetadataExclusionRules exclusionRules =
+                metadataExclusionProvider.load(
+                        DatabaseType.ORACLE
+                );
 
         String serviceName = source.getServiceName();
 
@@ -201,7 +211,8 @@ public class OracleHybridReplicationImpl
                                 sqlSchema,
                                 serviceName,
                                 database,
-                                counter
+                                counter,
+                                exclusionRules
                         );
                     }
             );
@@ -236,7 +247,8 @@ public class OracleHybridReplicationImpl
                                 sqlMaterializedViews,
                                 serviceName,
                                 database,
-                                counter
+                                counter,
+                                exclusionRules
                         );
                     }
             );
@@ -331,7 +343,8 @@ public class OracleHybridReplicationImpl
             String sql,
             String serviceName,
             DatabaseReplicationContext database,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         String databaseName = database.databaseName();
 
@@ -352,7 +365,8 @@ public class OracleHybridReplicationImpl
                                 targetConnection,
                                 sql,
                                 serviceName,
-                                database
+                                database,
+                                exclusionRules
                         );
                     }
             );
@@ -385,7 +399,8 @@ public class OracleHybridReplicationImpl
             String sqlMaterializedViews,
             String serviceName,
             DatabaseReplicationContext database,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         long started = System.nanoTime();
 
@@ -402,7 +417,8 @@ public class OracleHybridReplicationImpl
             ) {
                 snapshot = hybridCopyStreamer.loadObjects(
                         sourceConnection,
-                        sqlObjects
+                        sqlObjects,
+                        exclusionRules
                 );
             }
 

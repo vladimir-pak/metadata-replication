@@ -20,6 +20,8 @@ import com.gpb.replication.dto.SourceConnection;
 import com.gpb.replication.enums.DatabaseType;
 import com.gpb.replication.enums.MetadataType;
 import com.gpb.replication.exceptions.MetadataReplicationException;
+import com.gpb.replication.exclusion.MetadataExclusionProvider;
+import com.gpb.replication.exclusion.MetadataExclusionRules;
 import com.gpb.replication.metrics.MetricCounter;
 import com.gpb.replication.metrics.enums.IngestionMetricJob;
 import com.gpb.replication.repository.MetadataRepository;
@@ -39,6 +41,7 @@ public class MssqlReplicationImpl
 
     private final SqlQueryProvider sqlQueryProvider;
     private final MssqlMetadataCopyStreamer copyStreamer;
+    private final MetadataExclusionProvider metadataExclusionProvider;
 
     public MssqlReplicationImpl(
             SqlQueryProvider sqlQueryProvider,
@@ -49,7 +52,8 @@ public class MssqlReplicationImpl
             MetadataRepository metadataRepository,
             SourceJdbcConnectionFactory sourceConnectionFactory,
             IngestionMetricService ingestionMetricService,
-            MssqlMetadataCopyStreamer copyStreamer) {
+            MssqlMetadataCopyStreamer copyStreamer,
+            MetadataExclusionProvider metadataExclusionProvider) {
 
         super(
                 jdbcTemplate,
@@ -61,6 +65,7 @@ public class MssqlReplicationImpl
 
         this.sqlQueryProvider = sqlQueryProvider;
         this.copyStreamer = copyStreamer;
+        this.metadataExclusionProvider = metadataExclusionProvider;
     }
 
     @Override
@@ -75,6 +80,11 @@ public class MssqlReplicationImpl
 
         long started = System.nanoTime();
         validateSource(source);
+
+        MetadataExclusionRules exclusionRules =
+                metadataExclusionProvider.load(
+                        DatabaseType.MSSQL
+                );
 
         String serviceName = source.getServiceName();
 
@@ -162,7 +172,8 @@ public class MssqlReplicationImpl
                             sqlSchema,
                             serviceName,
                             databases,
-                            counter
+                            counter,
+                            exclusionRules
                     );
                 }
         );
@@ -185,7 +196,8 @@ public class MssqlReplicationImpl
                             sqlTable,
                             serviceName,
                             databases,
-                            counter
+                            counter,
+                            exclusionRules
                     );
                 }
         );
@@ -261,7 +273,8 @@ public class MssqlReplicationImpl
             String sql,
             String serviceName,
             List<DatabaseReplicationContext> databases,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         long total = 0;
 
@@ -285,7 +298,8 @@ public class MssqlReplicationImpl
                                     targetConnection,
                                     sql,
                                     serviceName,
-                                    database
+                                    database,
+                                    exclusionRules
                             );
                         }
                 );
@@ -314,7 +328,8 @@ public class MssqlReplicationImpl
             String sql,
             String serviceName,
             List<DatabaseReplicationContext> databases,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         long total = 0;
 
@@ -338,7 +353,8 @@ public class MssqlReplicationImpl
                                     targetConnection,
                                     sql,
                                     serviceName,
-                                    database
+                                    database,
+                                    exclusionRules
                             );
                         }
                 );

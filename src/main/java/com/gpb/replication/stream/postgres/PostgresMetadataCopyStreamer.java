@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import com.gpb.replication.dto.DatabaseReplicationContext;
+import com.gpb.replication.exclusion.MetadataExclusionRules;
 import com.gpb.replication.enums.DatabaseType;
 import com.gpb.replication.stream.AbstractMetadataCopyStreamer;
 import com.gpb.replication.stream.PostgresCopyCsvEncoder;
@@ -73,7 +74,8 @@ public class PostgresMetadataCopyStreamer
             Connection targetConnection,
             String sourceSql,
             String serviceName,
-            DatabaseReplicationContext database) {
+            DatabaseReplicationContext database,
+            MetadataExclusionRules exclusionRules) {
 
         return copySchemas(
                 sourceConnection,
@@ -84,7 +86,8 @@ public class PostgresMetadataCopyStreamer
                 rs -> serializeSchema(
                     rs,
                     serviceName,
-                    database
+                    database,
+                    exclusionRules
                 )
         );
     }
@@ -94,7 +97,8 @@ public class PostgresMetadataCopyStreamer
             Connection targetConnection,
             String sourceSql,
             String serviceName,
-            DatabaseReplicationContext database) {
+            DatabaseReplicationContext database,
+            MetadataExclusionRules exclusionRules) {
 
         return copyTables(
                 sourceConnection,
@@ -105,7 +109,8 @@ public class PostgresMetadataCopyStreamer
                 rs -> serializeTable(
                         rs,
                         serviceName,
-                        database
+                        database,
+                        exclusionRules
                 )
         );
     }
@@ -150,7 +155,8 @@ public class PostgresMetadataCopyStreamer
     private byte[] serializeSchema(
             ResultSet rs,
             String serviceName,
-            DatabaseReplicationContext database)
+            DatabaseReplicationContext database,
+            MetadataExclusionRules exclusionRules)
             throws Exception {
 
         long id =
@@ -164,6 +170,10 @@ public class PostgresMetadataCopyStreamer
                     rs,
                     "SCHEMA_NAME"
                 );
+
+        if (exclusionRules.isSchemaExcluded(schemaName)) {
+            return null;
+        }
 
         String fqn =
                 MetadataFqn.schema(
@@ -191,7 +201,8 @@ public class PostgresMetadataCopyStreamer
     private byte[] serializeTable(
             ResultSet rs,
             String serviceName,
-            DatabaseReplicationContext database)
+            DatabaseReplicationContext database,
+            MetadataExclusionRules exclusionRules)
             throws Exception {
 
         long id =
@@ -211,6 +222,11 @@ public class PostgresMetadataCopyStreamer
                     rs,
                     "TABLE_NAME"
                 );
+
+        if (exclusionRules.isSchemaExcluded(schemaName)
+                || exclusionRules.isTableExcluded(tableName)) {
+            return null;
+        }
 
         String description =
                 rs.getString(

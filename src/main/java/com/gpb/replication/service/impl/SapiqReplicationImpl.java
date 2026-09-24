@@ -17,6 +17,8 @@ import com.gpb.replication.enums.DatabaseType;
 import com.gpb.replication.enums.MetadataType;
 import com.gpb.replication.enums.ReplicationPipeline;
 import com.gpb.replication.exceptions.MetadataReplicationException;
+import com.gpb.replication.exclusion.MetadataExclusionProvider;
+import com.gpb.replication.exclusion.MetadataExclusionRules;
 import com.gpb.replication.metrics.MetricCounter;
 import com.gpb.replication.metrics.enums.IngestionMetricJob;
 import com.gpb.replication.repository.MetadataRepository;
@@ -39,6 +41,7 @@ public class SapiqReplicationImpl
     private final SqlQueryProvider sqlQueryProvider;
     private final SapiqMetadataCopyStreamer copyStreamer;
     private final boolean allowEmptyObjectSnapshot;
+    private final MetadataExclusionProvider metadataExclusionProvider;
 
     public SapiqReplicationImpl(
             SqlQueryProvider sqlQueryProvider,
@@ -51,7 +54,8 @@ public class SapiqReplicationImpl
             IngestionMetricService ingestionMetricService,
             SapiqMetadataCopyStreamer copyStreamer,
             @Value("${replication.sapiq.allow-empty-object-snapshot:false}")
-            boolean allowEmptyObjectSnapshot) {
+            boolean allowEmptyObjectSnapshot,
+            MetadataExclusionProvider metadataExclusionProvider) {
 
         super(
                 jdbcTemplate,
@@ -64,6 +68,7 @@ public class SapiqReplicationImpl
         this.sqlQueryProvider = sqlQueryProvider;
         this.copyStreamer = copyStreamer;
         this.allowEmptyObjectSnapshot = allowEmptyObjectSnapshot;
+        this.metadataExclusionProvider = metadataExclusionProvider;
     }
 
     @Override
@@ -83,6 +88,11 @@ public class SapiqReplicationImpl
 
         long started = System.nanoTime();
         validateSource(source);
+
+        MetadataExclusionRules exclusionRules =
+                metadataExclusionProvider.load(
+                        DatabaseType.SAPIQ
+                );
 
         String serviceName = source.getServiceName();
 
@@ -166,7 +176,8 @@ public class SapiqReplicationImpl
                                 sqlSchema,
                                 serviceName,
                                 database,
-                                counter
+                                counter,
+                                exclusionRules
                         );
                     }
             );
@@ -197,7 +208,8 @@ public class SapiqReplicationImpl
                                 sqlConstraint,
                                 serviceName,
                                 database,
-                                counter
+                                counter,
+                                exclusionRules
                         );
                     }
             );
@@ -289,7 +301,8 @@ public class SapiqReplicationImpl
             String sql,
             String serviceName,
             DatabaseReplicationContext database,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         try {
             List<com.gpb.replication.stream.sapiq.AbstractSapiqMetadataCopyStreamer.SchemaEntry> schemas;
@@ -297,7 +310,11 @@ public class SapiqReplicationImpl
             try (
                     Connection connection = sourceConnectionFactory.open(source)
             ) {
-                schemas = copyStreamer.loadSchemas(connection, sql);
+                schemas = copyStreamer.loadSchemas(
+                        connection, 
+                        sql, 
+                        exclusionRules
+                );
             }
 
             if (schemas.isEmpty()) {
@@ -355,7 +372,8 @@ public class SapiqReplicationImpl
             String sqlConstraint,
             String serviceName,
             DatabaseReplicationContext database,
-            MetricCounter counter) {
+            MetricCounter counter,
+            MetadataExclusionRules exclusionRules) {
 
         long started = System.nanoTime();
 
@@ -367,7 +385,8 @@ public class SapiqReplicationImpl
             ) {
                 snapshot = copyStreamer.loadStandardObjects(
                         connection,
-                        sqlTable
+                        sqlTable,
+                        exclusionRules
                 );
             }
 

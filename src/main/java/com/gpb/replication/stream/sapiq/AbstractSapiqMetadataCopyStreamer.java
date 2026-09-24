@@ -16,6 +16,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gpb.replication.dto.DatabaseReplicationContext;
+import com.gpb.replication.exclusion.MetadataExclusionRules;
 import com.gpb.replication.exceptions.MetadataReplicationException;
 import com.gpb.replication.stream.PostgresCopyCsvEncoder;
 import com.gpb.replication.utils.MetadataFqn;
@@ -152,9 +153,15 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
 
     public List<SchemaEntry> loadSchemas(
             Connection connection,
-            String sql) {
+            String sql,
+            MetadataExclusionRules exclusionRules) {
 
         long started = System.nanoTime();
+
+        long rows = 0;
+        long excluded = 0;
+        long invalid = 0;
+
         List<SchemaEntry> result = new ArrayList<>();
 
         try (
@@ -162,14 +169,33 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
                 ResultSet rs = statement.executeQuery()
         ) {
             while (rs.next()) {
+                rows++;
+
                 long id = requiredLong(rs, "OID");
-                String schemaName = trimToNull(rs.getString("SCHEMA_NAME"));
+                String schemaName =
+                        trimToNull(
+                                rs.getString("SCHEMA_NAME")
+                        );
 
                 if (schemaName == null) {
+                    invalid++;
+
                     log.warn(
                             "Skipping SAP IQ schema with empty name. oid={}",
                             id
                     );
+
+                    continue;
+                }
+
+                if (exclusionRules.isSchemaExcluded(schemaName)) {
+                    excluded++;
+
+                    log.debug(
+                            "SAP IQ schema excluded by rule. schema={}",
+                            schemaName
+                    );
+
                     continue;
                 }
 
@@ -182,8 +208,12 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
             }
 
             log.info(
-                    "SAP IQ schemas loaded. count={}, elapsedMs={}",
+                    "SAP IQ schemas loaded. "
+                            + "rows={}, included={}, excluded={}, invalid={}, elapsedMs={}",
+                    rows,
                     result.size(),
+                    excluded,
+                    invalid,
                     elapsedMs(started)
             );
 
@@ -200,23 +230,42 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
      */
     public Snapshot loadStandardObjects(
             Connection connection,
-            String sql) {
+            String sql,
+            MetadataExclusionRules exclusionRules) {
 
         long started = System.nanoTime();
-        LinkedHashMap<Long, ObjectMetadata> objects = new LinkedHashMap<>();
+
+        long rows = 0;
+        long excludedBySchema = 0;
+        long excludedByTable = 0;
+        long invalid = 0;
+
+        LinkedHashMap<Long, ObjectMetadata> objects =
+                new LinkedHashMap<>();
 
         try (
                 PreparedStatement statement = prepare(connection, sql);
                 ResultSet rs = statement.executeQuery()
         ) {
             while (rs.next()) {
+                rows++;
+
                 long tableId = requiredLong(rs, "TABLE_ID");
                 long id = requiredLong(rs, "OID");
 
-                String schemaName = trimToNull(rs.getString("SCHEMA_NAME"));
-                String tableName = trimToNull(rs.getString("TABLE_NAME"));
+                String schemaName =
+                        trimToNull(
+                                rs.getString("SCHEMA_NAME")
+                        );
+
+                String tableName =
+                        trimToNull(
+                                rs.getString("TABLE_NAME")
+                        );
 
                 if (schemaName == null || tableName == null) {
+                    invalid++;
+
                     log.warn(
                             "Skipping SAP IQ object with empty schema/table name. "
                                     + "tableId={}, schema={}, table={}",
@@ -224,48 +273,94 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
                             schemaName,
                             tableName
                     );
+
                     continue;
                 }
 
-                String tableType = normalizeTableType(
-                        rs.getString("TABLE_TYPE")
-                );
-                String description = rs.getString("DESCRIPTION");
-                String viewDefinition = trimToNull(
-                        rs.getString("VIEW_DEFINITION")
-                );
+                /*
+                 * IMPORTANT:
+                 * Сначала проверяем schema, затем table.
+                 *
+                 * Это позволяет:
+                 * - не выполнять table regex для уже исключённой схемы;
+                 * - сохранять одинаковую семантику STANDARD/HYBRID.
+                 */
+                if (exclusionRules.isSchemaExcluded(schemaName)) {
+                    excludedBySchema++;
+                    continue;
+                }
 
-                ObjectMetadata metadata = new ObjectMetadata(
-                        tableId,
-                        id,
-                        schemaName,
-                        tableName,
-                        tableType,
-                        description,
-                        viewDefinition
-                );
+                if (exclusionRules.isTableExcluded(tableName)) {
+                    excludedByTable++;
+                    continue;
+                }
 
-                ObjectMetadata previous = objects.putIfAbsent(tableId, metadata);
+                String tableType =
+                        normalizeTableType(
+                                rs.getString("TABLE_TYPE")
+                        );
+
+                String description =
+                        rs.getString("DESCRIPTION");
+
+                String viewDefinition =
+                        trimToNull(
+                                rs.getString("VIEW_DEFINITION")
+                        );
+
+                ObjectMetadata metadata =
+                        new ObjectMetadata(
+                                tableId,
+                                id,
+                                schemaName,
+                                tableName,
+                                tableType,
+                                description,
+                                viewDefinition
+                        );
+
+                ObjectMetadata previous =
+                        objects.putIfAbsent(
+                                tableId,
+                                metadata
+                        );
+
                 if (previous != null) {
-                    throw duplicateObject(tableId, previous, metadata);
+                    throw duplicateObject(
+                            tableId,
+                            previous,
+                            metadata
+                    );
                 }
             }
 
-            Snapshot snapshot = new Snapshot(
-                    new ArrayList<>(objects.values()),
-                    Map.copyOf(objects)
-            );
+            Snapshot snapshot =
+                    new Snapshot(
+                            new ArrayList<>(
+                                    objects.values()
+                            ),
+                            Map.copyOf(objects)
+                    );
 
             log.info(
-                    "SAP IQ STANDARD object catalog loaded. objects={}, elapsedMs={}",
+                    "SAP IQ STANDARD object catalog loaded. "
+                            + "rows={}, objects={}, excludedBySchema={}, "
+                            + "excludedByTable={}, invalid={}, elapsedMs={}",
+                    rows,
                     snapshot.size(),
+                    excludedBySchema,
+                    excludedByTable,
+                    invalid,
                     elapsedMs(started)
             );
 
             return snapshot;
 
         } catch (Exception e) {
-            throw wrap("STANDARD_OBJECTS", e);
+            throw wrap(
+                    "STANDARD_OBJECTS",
+                    e
+            );
         }
     }
 
@@ -274,23 +369,42 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
      */
     public Snapshot loadObjects(
             Connection connection,
-            String sql) {
+            String sql,
+            MetadataExclusionRules exclusionRules) {
 
         long started = System.nanoTime();
-        LinkedHashMap<Long, ObjectMetadata> objects = new LinkedHashMap<>();
+
+        long rows = 0;
+        long excludedBySchema = 0;
+        long excludedByTable = 0;
+        long invalid = 0;
+
+        LinkedHashMap<Long, ObjectMetadata> objects =
+                new LinkedHashMap<>();
 
         try (
                 PreparedStatement statement = prepare(connection, sql);
                 ResultSet rs = statement.executeQuery()
         ) {
             while (rs.next()) {
+                rows++;
+
                 long tableId = requiredLong(rs, "TABLE_ID");
                 long id = requiredLong(rs, "ID");
 
-                String schemaName = trimToNull(rs.getString("SCHEMA_NAME"));
-                String tableName = trimToNull(rs.getString("TABLE_NAME"));
+                String schemaName =
+                        trimToNull(
+                                rs.getString("SCHEMA_NAME")
+                        );
+
+                String tableName =
+                        trimToNull(
+                                rs.getString("TABLE_NAME")
+                        );
 
                 if (schemaName == null || tableName == null) {
+                    invalid++;
+
                     log.warn(
                             "Skipping SAP IQ object with empty schema/table name. "
                                     + "tableId={}, schema={}, table={}",
@@ -298,45 +412,88 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
                             schemaName,
                             tableName
                     );
+
                     continue;
                 }
 
-                String tableType = normalizeTableType(
-                        rs.getString("TABLE_TYPE")
-                );
-                String description = rs.getString("DESCRIPTION");
+                /*
+                 * Regex выполняются только при построении object snapshot.
+                 *
+                 * Detail-workers (columns/constraints/views) повторно regex
+                 * не выполняют. Для excluded table snapshot.find(tableId)
+                 * вернёт null, и строка будет дешево пропущена.
+                 */
+                if (exclusionRules.isSchemaExcluded(schemaName)) {
+                    excludedBySchema++;
+                    continue;
+                }
 
-                ObjectMetadata metadata = new ObjectMetadata(
-                        tableId,
-                        id,
-                        schemaName,
-                        tableName,
-                        tableType,
-                        description,
-                        null
-                );
+                if (exclusionRules.isTableExcluded(tableName)) {
+                    excludedByTable++;
+                    continue;
+                }
 
-                ObjectMetadata previous = objects.putIfAbsent(tableId, metadata);
+                String tableType =
+                        normalizeTableType(
+                                rs.getString("TABLE_TYPE")
+                        );
+
+                String description =
+                        rs.getString("DESCRIPTION");
+
+                ObjectMetadata metadata =
+                        new ObjectMetadata(
+                                tableId,
+                                id,
+                                schemaName,
+                                tableName,
+                                tableType,
+                                description,
+                                null
+                        );
+
+                ObjectMetadata previous =
+                        objects.putIfAbsent(
+                                tableId,
+                                metadata
+                        );
+
                 if (previous != null) {
-                    throw duplicateObject(tableId, previous, metadata);
+                    throw duplicateObject(
+                            tableId,
+                            previous,
+                            metadata
+                    );
                 }
             }
 
-            Snapshot snapshot = new Snapshot(
-                    new ArrayList<>(objects.values()),
-                    Map.copyOf(objects)
-            );
+            Snapshot snapshot =
+                    new Snapshot(
+                            new ArrayList<>(
+                                    objects.values()
+                            ),
+                            Map.copyOf(objects)
+                    );
 
             log.info(
-                    "SAP IQ HYBRID object catalog loaded. objects={}, elapsedMs={}",
+                    "SAP IQ HYBRID object catalog loaded. "
+                            + "rows={}, objects={}, excludedBySchema={}, "
+                            + "excludedByTable={}, invalid={}, elapsedMs={}",
+                    rows,
                     snapshot.size(),
+                    excludedBySchema,
+                    excludedByTable,
+                    invalid,
                     elapsedMs(started)
             );
 
             return snapshot;
 
         } catch (Exception e) {
-            throw wrap("OBJECTS", e);
+            throw wrap(
+                    "OBJECTS",
+                    e
+            );
         }
     }
 
@@ -961,21 +1118,6 @@ public abstract class AbstractSapiqMetadataCopyStreamer {
             return number.longValue();
         }
         return Long.parseLong(value.toString());
-    }
-
-    private Long getLong(
-            ResultSet rs,
-            String column)
-            throws SQLException {
-
-        Object value = rs.getObject(column);
-        if (value == null) {
-            return null;
-        }
-        if (value instanceof Number number) {
-            return number.longValue();
-        }
-        return Long.valueOf(value.toString());
     }
 
     private Integer getInteger(

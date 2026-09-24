@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import com.gpb.replication.dto.DatabaseReplicationContext;
+import com.gpb.replication.exclusion.MetadataExclusionRules;
 import com.gpb.replication.enums.DatabaseType;
 import com.gpb.replication.stream.AbstractMetadataCopyStreamer;
 import com.gpb.replication.stream.PostgresCopyCsvEncoder;
@@ -91,7 +92,8 @@ public class OracleMetadataCopyStreamer
             Connection targetConnection,
             String sourceSql,
             String serviceName,
-            DatabaseReplicationContext database) {
+            DatabaseReplicationContext database,
+            MetadataExclusionRules exclusionRules) {
 
         return copySchemas(
                 sourceConnection,
@@ -103,7 +105,8 @@ public class OracleMetadataCopyStreamer
                         serializeSchema(
                                 rs,
                                 serviceName,
-                                database
+                                database,
+                                exclusionRules
                         )
         );
     }
@@ -119,7 +122,8 @@ public class OracleMetadataCopyStreamer
             Connection targetConnection,
             String sourceSql,
             String serviceName,
-            DatabaseReplicationContext database) {
+            DatabaseReplicationContext database,
+            MetadataExclusionRules exclusionRules) {
 
         return copyTables(
                 sourceConnection,
@@ -131,7 +135,8 @@ public class OracleMetadataCopyStreamer
                         serializeTable(
                                 rs,
                                 serviceName,
-                                database
+                                database,
+                                exclusionRules
                         )
         );
     }
@@ -151,7 +156,8 @@ public class OracleMetadataCopyStreamer
             Connection targetConnection,
             String sourceSql,
             String serviceName,
-            DatabaseReplicationContext database) {
+            DatabaseReplicationContext database,
+            MetadataExclusionRules exclusionRules) {
 
         return copyTables(
                 sourceConnection,
@@ -163,7 +169,8 @@ public class OracleMetadataCopyStreamer
                         serializeView(
                                 rs,
                                 serviceName,
-                                database
+                                database,
+                                exclusionRules
                         )
         );
     }
@@ -183,7 +190,8 @@ public class OracleMetadataCopyStreamer
             Connection targetConnection,
             String sourceSql,
             String serviceName,
-            DatabaseReplicationContext database) {
+            DatabaseReplicationContext database,
+            MetadataExclusionRules exclusionRules) {
 
         return copyTables(
                 sourceConnection,
@@ -195,7 +203,8 @@ public class OracleMetadataCopyStreamer
                         serializeView(
                                 rs,
                                 serviceName,
-                                database
+                                database,
+                                exclusionRules
                         )
         );
     }
@@ -215,7 +224,8 @@ public class OracleMetadataCopyStreamer
             Connection targetConnection,
             String sourceSql,
             String serviceName,
-            DatabaseReplicationContext database) {
+            DatabaseReplicationContext database,
+            MetadataExclusionRules exclusionRules) {
 
         return copyTables(
                 sourceConnection,
@@ -227,7 +237,8 @@ public class OracleMetadataCopyStreamer
                         serializeView(
                                 rs,
                                 serviceName,
-                                database
+                                database,
+                                exclusionRules
                         )
         );
     }
@@ -284,7 +295,8 @@ public class OracleMetadataCopyStreamer
     private byte[] serializeSchema(
             ResultSet rs,
             String serviceName,
-            DatabaseReplicationContext database)
+            DatabaseReplicationContext database,
+            MetadataExclusionRules exclusionRules)
             throws Exception {
 
         long id =
@@ -298,6 +310,10 @@ public class OracleMetadataCopyStreamer
                         rs,
                         "SCHEMA_NAME"
                 );
+
+        if (exclusionRules.isSchemaExcluded(schemaName)) {
+            return null;
+        }
 
         String fqn =
                 MetadataFqn.schema(
@@ -331,7 +347,8 @@ public class OracleMetadataCopyStreamer
     private byte[] serializeTable(
             ResultSet rs,
             String serviceName,
-            DatabaseReplicationContext database)
+            DatabaseReplicationContext database,
+            MetadataExclusionRules exclusionRules)
             throws Exception {
 
         /*
@@ -355,6 +372,11 @@ public class OracleMetadataCopyStreamer
                         rs,
                         "TABLE_NAME"
                 );
+
+        if (exclusionRules.isSchemaExcluded(schemaName)
+                || exclusionRules.isTableExcluded(tableName)) {
+            return null;
+        }
 
         String tableType =
                 requiredString(
@@ -417,7 +439,8 @@ public class OracleMetadataCopyStreamer
     private byte[] serializeView(
             ResultSet rs,
             String serviceName,
-            DatabaseReplicationContext database)
+            DatabaseReplicationContext database,
+            MetadataExclusionRules exclusionRules)
             throws Exception {
 
         long id =
@@ -472,6 +495,16 @@ public class OracleMetadataCopyStreamer
                 rs.getString(
                         "VIEW_DEFINITION"
                 );
+
+        /*
+         * VIEW_DEFINITION may be Oracle LONG.
+         * Read it before deciding to skip the row so ResultSet streaming
+         * order remains unchanged for LONG-based queries.
+         */
+        if (exclusionRules.isSchemaExcluded(schemaName)
+                || exclusionRules.isTableExcluded(tableName)) {
+            return null;
+        }
 
         return serializeTableMetadata(
                 id,

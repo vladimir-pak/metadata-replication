@@ -19,6 +19,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gpb.replication.dto.DatabaseReplicationContext;
+import com.gpb.replication.exclusion.MetadataExclusionRules;
 import com.gpb.replication.exceptions.MetadataReplicationException;
 import com.gpb.replication.stream.PostgresCopyCsvEncoder;
 import com.gpb.replication.utils.MetadataFqn;
@@ -162,9 +163,13 @@ public class PostgresHybridMetadataCopyStreamer {
 
     public List<SchemaEntry> loadSchemas(
             Connection connection,
-            String sql) {
+            String sql,
+            MetadataExclusionRules exclusionRules) {
 
         long started = System.nanoTime();
+        long rows = 0;
+        long excluded = 0;
+
         List<SchemaEntry> result = new ArrayList<>();
 
         try (
@@ -172,17 +177,30 @@ public class PostgresHybridMetadataCopyStreamer {
                 ResultSet rs = statement.executeQuery()
         ) {
             while (rs.next()) {
+                rows++;
+
+                long id = requiredLong(rs, "ID");
+                String schemaName = requiredString(rs, "SCHEMA_NAME");
+
+                if (exclusionRules.isSchemaExcluded(schemaName)) {
+                    excluded++;
+                    continue;
+                }
+
                 result.add(
                         new SchemaEntry(
-                                requiredLong(rs, "ID"),
-                                requiredString(rs, "SCHEMA_NAME")
+                                id,
+                                schemaName
                         )
                 );
             }
 
             log.info(
-                    "PostgreSQL HYBRID schemas loaded. count={}, elapsedMs={}",
+                    "PostgreSQL HYBRID schemas loaded. "
+                            + "rows={}, included={}, excluded={}, elapsedMs={}",
+                    rows,
                     result.size(),
+                    excluded,
                     elapsedMs(started)
             );
 
@@ -195,19 +213,38 @@ public class PostgresHybridMetadataCopyStreamer {
 
     public Snapshot loadObjects(
             Connection connection,
-            String sql) {
+            String sql,
+            MetadataExclusionRules exclusionRules) {
 
         long started = System.nanoTime();
-        LinkedHashMap<Long, ObjectMetadata> objects = new LinkedHashMap<>();
+        long rows = 0;
+        long excludedBySchema = 0;
+        long excludedByTable = 0;
+
+        LinkedHashMap<Long, ObjectMetadata> objects =
+                new LinkedHashMap<>();
 
         try (
                 PreparedStatement statement = prepare(connection, sql);
                 ResultSet rs = statement.executeQuery()
         ) {
             while (rs.next()) {
+                rows++;
+
                 long id = requiredLong(rs, "ID");
                 String schemaName = requiredString(rs, "SCHEMA_NAME");
                 String tableName = requiredString(rs, "TABLE_NAME");
+
+                if (exclusionRules.isSchemaExcluded(schemaName)) {
+                    excludedBySchema++;
+                    continue;
+                }
+
+                if (exclusionRules.isTableExcluded(tableName)) {
+                    excludedByTable++;
+                    continue;
+                }
+
                 String tableType = requiredString(rs, "TABLE_TYPE");
                 String description = rs.getString("DESCRIPTION");
 
@@ -238,8 +275,13 @@ public class PostgresHybridMetadataCopyStreamer {
             );
 
             log.info(
-                    "PostgreSQL HYBRID object catalog loaded. objects={}, elapsedMs={}",
+                    "PostgreSQL HYBRID object catalog loaded. "
+                            + "rows={}, objects={}, excludedBySchema={}, "
+                            + "excludedByTable={}, elapsedMs={}",
+                    rows,
                     snapshot.size(),
+                    excludedBySchema,
+                    excludedByTable,
                     elapsedMs(started)
             );
 
