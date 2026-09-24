@@ -123,7 +123,7 @@ replication:
       query-timeout-seconds: 0
 
       # Защита от случайного DELETE snapshot при проблеме с правами/SQL.
-      allow-empty-object-snapshot: true
+      allow-empty-object-snapshot: false
   postgres:
     pipeline: HYBRID # ALLOWED: STANDARD | HYBRID
 
@@ -137,7 +137,7 @@ replication:
       query-timeout-seconds: 0
 
       # Защита от случайного DELETE snapshot при проблеме с правами/SQL.
-      allow-empty-object-snapshot: true
+      allow-empty-object-snapshot: false
   mssql:
     pipeline: HYBRID # ALLOWED: STANDARD | HYBRID
 
@@ -151,7 +151,7 @@ replication:
       query-timeout-seconds: 0
 
       # Защита от случайного DELETE snapshot при проблеме с правами/SQL.
-      allow-empty-object-snapshot: true
+      allow-empty-object-snapshot: false
   sapiq:
     pipeline: HYBRID # ALLOWED: STANDARD | HYBRID
 
@@ -165,7 +165,7 @@ replication:
       query-timeout-seconds: 0
 
       # Защита от случайного DELETE snapshot при проблеме с правами/SQL.
-      allow-empty-object-snapshot: true
+      allow-empty-object-snapshot: false
 
 logging:
   cef:
