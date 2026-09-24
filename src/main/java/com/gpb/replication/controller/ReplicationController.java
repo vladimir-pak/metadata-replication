@@ -39,8 +39,11 @@ public class ReplicationController {
     private final ReplicationServiceRegistry replicationServiceRegistry;
     private final IngestionMetricService ingestionMetricService;
 
-    @Value("${replication.oracle.pipeline:STANDARD}")
+    @Value("${replication.oracle.pipeline:HYBRID}")
     private String defaultOraclePipeline;
+
+    @Value("${replication.mssql.pipeline:HYBRID}")
+    private String defaultMssqlPipeline;
 
     @PostMapping("/replication/start")
     @Operation(summary = "Запуск репликации по наименованию сервиса")
@@ -116,6 +119,15 @@ public class ReplicationController {
             return configured != null
                     ? configured
                     : ReplicationPipeline.STANDARD;
+        }
+
+        if (databaseType == DatabaseType.MSSQL) {
+            ReplicationPipeline configured =
+                    ReplicationPipeline.from(defaultMssqlPipeline);
+
+            return configured != null
+                    ? configured
+                    : ReplicationPipeline.HYBRID;
         }
 
         return ReplicationPipeline.STANDARD;

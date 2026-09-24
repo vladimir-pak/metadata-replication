@@ -106,7 +106,6 @@ sources:
 
 replication:
   oracle:
-    fetch-size: 5000
     pipeline: HYBRID # ALLOWED: STANDARD | HYBRID
 
     fetch-size: 10000
