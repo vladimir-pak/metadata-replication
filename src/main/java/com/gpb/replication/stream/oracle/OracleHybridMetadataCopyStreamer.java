@@ -469,7 +469,11 @@ public class OracleHybridMetadataCopyStreamer {
                  * В VIEW_LONG/MVIEW колонка VIEW_DEFINITION = LONG
                  * и намеренно является последней колонкой SELECT.
                  */
-                String definition = rs.getString("VIEW_DEFINITION");
+                String definition = sanitizePostgresText(
+                        rs.getString(
+                                "VIEW_DEFINITION"
+                        )
+                );
 
                 ObjectMetadata object = snapshot.find(
                         new ObjectKey(schemaName, tableName)
@@ -522,7 +526,10 @@ public class OracleHybridMetadataCopyStreamer {
         ObjectNode data = objectMapper.createObjectNode();
         data.put("tableType", object.tableType);
 
-        String viewDefinition = object.viewDefinition.get();
+        String viewDefinition = sanitizePostgresText(
+                object.viewDefinition.get()
+        );
+                
         if (viewDefinition == null) {
             data.putNull("viewDefinition");
         } else {
@@ -604,6 +611,23 @@ public class OracleHybridMetadataCopyStreamer {
 
             default -> dataType;
         };
+    }
+
+    private String sanitizePostgresText(
+            String value) {
+
+        if (value == null) {
+            return null;
+        }
+
+        if (value.indexOf('\u0000') < 0) {
+            return value;
+        }
+
+        return value.replace(
+                "\u0000",
+                ""
+        );
     }
 
     private String mapConstraintType(String type) {

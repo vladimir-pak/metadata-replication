@@ -389,8 +389,10 @@ public class OracleMetadataCopyStreamer
          * LONG здесь больше нет.
          */
         String viewDefinition =
-                rs.getString(
-                        "VIEW_DEFINITION"
+                sanitizePostgresText(
+                        rs.getString(
+                                "VIEW_DEFINITION"
+                        )
                 );
 
         String description =
@@ -492,8 +494,10 @@ public class OracleMetadataCopyStreamer
          *      LONG
          */
         String viewDefinition =
-                rs.getString(
-                        "VIEW_DEFINITION"
+                sanitizePostgresText(
+                        rs.getString(
+                                "VIEW_DEFINITION"
+                        )
                 );
 
         /*
@@ -670,6 +674,23 @@ public class OracleMetadataCopyStreamer
 
         return Long.valueOf(
                 value.toString()
+        );
+    }
+
+    private String sanitizePostgresText(
+            String value) {
+
+        if (value == null) {
+            return null;
+        }
+
+        if (value.indexOf('\u0000') < 0) {
+            return value;
+        }
+
+        return value.replace(
+                "\u0000",
+                ""
         );
     }
 
