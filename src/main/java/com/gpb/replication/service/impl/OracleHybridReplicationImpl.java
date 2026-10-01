@@ -128,10 +128,6 @@ public class OracleHybridReplicationImpl
                 DatabaseType.ORACLE,
                 "hybrid_objects"
         );
-        String sqlObjectsLegacy = sqlQueryProvider.getQuery(
-                DatabaseType.ORACLE,
-                "hybrid_objects_legacy"
-        );
         String sqlColumns = sqlQueryProvider.getQuery(
                 DatabaseType.ORACLE,
                 "hybrid_columns"
@@ -244,7 +240,6 @@ public class OracleHybridReplicationImpl
                         return replicateTablesHybrid(
                                 source,
                                 sqlObjects,
-                                sqlObjectsLegacy,
                                 sqlColumns,
                                 sqlConstraints,
                                 sqlFastViews,
@@ -397,7 +392,6 @@ public class OracleHybridReplicationImpl
     private long replicateTablesHybrid(
             SourceConnection source,
             String sqlObjects,
-            String sqlObjectsLegacy,
             String sqlColumns,
             String sqlConstraints,
             String sqlFastViews,
@@ -424,7 +418,6 @@ public class OracleHybridReplicationImpl
                 snapshot = loadObjectsWithFallback(
                         source,
                         sqlObjects,
-                        sqlObjectsLegacy,
                         exclusionRules,
                         serviceName
                 );
@@ -535,80 +528,127 @@ public class OracleHybridReplicationImpl
             String sqlLongViews,
             String sqlMaterializedViews) {
 
-        ExecutorService executor = Executors.newFixedThreadPool(
-                parallelism,
-                oracleHybridThreadFactory()
-        );
+        ExecutorService executor =
+                Executors.newFixedThreadPool(
+                        parallelism,
+                        oracleHybridThreadFactory()
+                );
 
-        List<Callable<LoadResult>> tasks = List.of(
-                () -> withSourceConnection(
-                        source,
-                        connection -> hybridCopyStreamer.loadColumns(
-                                connection,
-                                sqlColumns,
-                                snapshot
-                        )
-                ),
-                () -> withSourceConnection(
-                        source,
-                        connection -> hybridCopyStreamer.loadConstraints(
-                                connection,
-                                sqlConstraints,
-                                snapshot
-                        )
-                ),
-                () -> withSourceConnection(
-                        source,
-                        connection -> hybridCopyStreamer.loadFastViews(
-                                connection,
+        List<Callable<LoadResult>> tasks =
+                List.of(
+
+                        /*
+                        * COLUMNS
+                        *
+                        * ORACLE_MAINTAINED здесь нет,
+                        * поэтому fallback не нужен.
+                        */
+                        () -> withSourceConnection(
+                                source,
+                                connection ->
+                                        hybridCopyStreamer.loadColumns(
+                                                connection,
+                                                sqlColumns,
+                                                snapshot
+                                        )
+                        ),
+                        /*
+                        * CONSTRAINTS
+                        */
+                        () -> withSourceConnection(
+                                source,
+                                connection ->
+                                        hybridCopyStreamer.loadConstraints(
+                                                connection,
+                                                sqlConstraints,
+                                                snapshot
+                                        )
+                        ),
+                        /*
+                        * FAST VIEW
+                        */
+                        () -> executeWithOracleLegacyFallback(
+                                source,
                                 sqlFastViews,
-                                snapshot
-                        )
-                ),
-                () -> withSourceConnection(
-                        source,
-                        connection -> {
+                                "VIEW_FAST",
+                                (connection, effectiveSql) ->
+                                        hybridCopyStreamer.loadFastViews(
+                                                connection,
+                                                effectiveSql,
+                                                snapshot
+                                        )
+                        ),
+                        /*
+                        * LONG VIEW + MATERIALIZED VIEW
+                        * Они остаются в одном worker-е,
+                        * чтобы сохранить текущий лимит
+                        * DETAIL_WORKERS = 4.
+                        */
+                        () -> {
                             LoadResult longViews =
-                                    hybridCopyStreamer.loadLongViews(
-                                            connection,
+                                    executeWithOracleLegacyFallback(
+                                            source,
                                             sqlLongViews,
-                                            snapshot
+                                            "VIEW_LONG",
+                                            (connection, effectiveSql) ->
+                                                    hybridCopyStreamer
+                                                            .loadLongViews(
+                                                                    connection,
+                                                                    effectiveSql,
+                                                                    snapshot
+                                                            )
                                     );
-
                             LoadResult mviews =
-                                    hybridCopyStreamer.loadMaterializedViews(
-                                            connection,
+                                    executeWithOracleLegacyFallback(
+                                            source,
                                             sqlMaterializedViews,
-                                            snapshot
+                                            "MVIEW",
+                                            (connection, effectiveSql) ->
+                                                    hybridCopyStreamer
+                                                            .loadMaterializedViews(
+                                                                    connection,
+                                                                    effectiveSql,
+                                                                    snapshot
+                                                            )
                                     );
-
                             return LoadResult.combine(
                                     "VIEW_LONG+MVIEW",
                                     longViews,
                                     mviews
                             );
                         }
-                )
-        );
+                );
 
         try {
-            List<Future<LoadResult>> futures = executor.invokeAll(tasks);
+
+            List<Future<LoadResult>> futures =
+                    executor.invokeAll(tasks);
 
             for (Future<LoadResult> future : futures) {
+
                 try {
-                    LoadResult result = future.get();
+
+                    LoadResult result =
+                            future.get();
+
                     log.debug(
-                            "Oracle HYBRID worker finished. stage={}, rows={}, applied={}, skipped={}",
+                            "Oracle HYBRID worker finished. "
+                                    + "stage={}, rows={}, applied={}, skipped={}",
                             result.stage(),
                             result.rows(),
                             result.applied(),
                             result.skipped()
                     );
+
                 } catch (ExecutionException e) {
-                    Throwable cause = e.getCause();
+
+                    Throwable cause =
+                            e.getCause();
+
                     if (cause instanceof RuntimeException runtimeException) {
                         throw runtimeException;
                     }
+
                     throw new MetadataReplicationException(
                             "Oracle HYBRID detail worker failed",
                             cause
@@ -617,12 +657,16 @@ public class OracleHybridReplicationImpl
             }
 
         } catch (InterruptedException e) {
+
             Thread.currentThread().interrupt();
+
             throw new MetadataReplicationException(
                     "Oracle HYBRID detail workers interrupted",
                     e
             );
+
         } finally {
+
             executor.shutdownNow();
         }
     }
@@ -694,69 +738,33 @@ public class OracleHybridReplicationImpl
 
     private Snapshot loadObjectsWithFallback(
             SourceConnection source,
-            String primarySql,
-            String fallbackSql,
+            String sql,
             MetadataExclusionRules exclusionRules,
             String serviceName) {
 
-        try (
-                Connection connection =
-                        sourceConnectionFactory.open(source)
-        ) {
+        try {
 
-            return hybridCopyStreamer.loadObjects(
-                    connection,
-                    primarySql,
-                    exclusionRules
+            return executeWithOracleLegacyFallback(
+                    source,
+                    sql,
+                    "OBJECTS",
+                    (connection, effectiveSql) ->
+                            hybridCopyStreamer.loadObjects(
+                                    connection,
+                                    effectiveSql,
+                                    exclusionRules
+                            )
             );
+
+        } catch (MetadataReplicationException e) {
+            throw e;
 
         } catch (Exception e) {
 
-            if (!isOracleMaintainedUnsupported(e)) {
-                throw propagateObjectLoadException(e);
-            }
-
-            log.warn(
-                    "Oracle ORACLE_MAINTAINED is not supported. "
-                            + "Retrying object catalog with legacy schema filtering. "
-                            + "serviceName={}",
-                    serviceName
-            );
-        }
-
-        /*
-        * Новое connection намеренно:
-        * после JDBC SQL exception не полагаемся на состояние
-        * предыдущего Oracle connection.
-        */
-        try (
-                Connection connection =
-                        sourceConnectionFactory.open(source)
-        ) {
-
-            Snapshot snapshot =
-                    hybridCopyStreamer.loadObjects(
-                            connection,
-                            fallbackSql,
-                            exclusionRules
-                    );
-
-            log.info(
-                    "Oracle HYBRID object catalog loaded "
-                            + "using legacy schema fallback. "
-                            + "serviceName={}, objects={}",
-                    serviceName,
-                    snapshot.size()
-            );
-
-            return snapshot;
-
-        } catch (Exception fallbackException) {
-
             throw new MetadataReplicationException(
-                    "Oracle HYBRID object catalog fallback failed. "
+                    "Oracle HYBRID object catalog load failed. "
                             + "serviceName=" + serviceName,
-                    fallbackException
+                    e
             );
         }
     }
@@ -791,16 +799,129 @@ public class OracleHybridReplicationImpl
         return false;
     }
 
-    private MetadataReplicationException propagateObjectLoadException(
-            Exception e) {
+    @FunctionalInterface
+    private interface OracleSqlWork<T> {
+        T execute(
+                Connection connection,
+                String sql)
+                throws Exception;
+    }
 
-        if (e instanceof MetadataReplicationException mre) {
-            return mre;
+    private <T> T executeWithOracleLegacyFallback(
+            SourceConnection source,
+            String sql,
+            String stage,
+            OracleSqlWork<T> work)
+            throws Exception {
+
+        /*
+        * Основная попытка.
+        */
+        try (
+                Connection connection =
+                        sourceConnectionFactory.open(source)
+        ) {
+
+            return work.execute(
+                    connection,
+                    sql
+            );
+
+        } catch (Exception e) {
+
+            if (!isOracleMaintainedUnsupported(e)) {
+                throw e;
+            }
+
+            log.warn(
+                    "Oracle ORACLE_MAINTAINED is not supported. "
+                            + "Retrying with legacy schema filtering. "
+                            + "stage={}, serviceName={}",
+                    stage,
+                    source.getServiceName()
+            );
         }
 
-        return new MetadataReplicationException(
-                "Oracle HYBRID object catalog load failed",
-                e
+        String fallbackSql =
+                buildOracleLegacySql(sql);
+
+        /*
+        * Новое connection обязательно.
+        */
+        try (
+                Connection connection =
+                        sourceConnectionFactory.open(source)
+        ) {
+
+            T result =
+                    work.execute(
+                            connection,
+                            fallbackSql
+                    );
+
+            log.info(
+                    "Oracle legacy schema fallback succeeded. "
+                            + "stage={}, serviceName={}",
+                    stage,
+                    source.getServiceName()
+            );
+
+            return result;
+
+        } catch (Exception fallbackException) {
+
+            throw new MetadataReplicationException(
+                    "Oracle legacy schema fallback failed. "
+                            + "stage=" + stage
+                            + ", serviceName="
+                            + source.getServiceName(),
+                    fallbackException
+            );
+        }
+    }
+
+    private String buildOracleLegacySql(
+            String sql) {
+
+        String sourcePredicate =
+                "u.oracle_maintained = 'N'";
+
+        String legacyPredicate =
+                """
+                u.username NOT IN (
+                    'SYS',
+                    'SYSTEM',
+                    'OUTLN',
+                    'DBSNMP',
+                    'SYSMAN',
+                    'MDSYS',
+                    'ORDSYS',
+                    'ORDDATA',
+                    'CTXSYS',
+                    'XDB',
+                    'WMSYS',
+                    'OLAPSYS',
+                    'OWBSYS',
+                    'OWBSYS_AUDIT',
+                    'APPQOSSYS',
+                    'AUDSYS',
+                    'GSMADMIN_INTERNAL',
+                    'OJVMSYS',
+                    'DVF',
+                    'DVSYS'
+                )
+                """;
+
+        if (!sql.contains(sourcePredicate)) {
+            throw new MetadataReplicationException(
+                    "Oracle legacy fallback cannot be applied: "
+                            + "ORACLE_MAINTAINED predicate not found"
+            );
+        }
+
+        return sql.replace(
+                sourcePredicate,
+                legacyPredicate
         );
     }
 
