@@ -128,6 +128,10 @@ public class OracleHybridReplicationImpl
                 DatabaseType.ORACLE,
                 "hybrid_objects"
         );
+        String sqlObjectsLegacy = sqlQueryProvider.getQuery(
+                DatabaseType.ORACLE,
+                "hybrid_objects_legacy"
+        );
         String sqlColumns = sqlQueryProvider.getQuery(
                 DatabaseType.ORACLE,
                 "hybrid_columns"
@@ -240,6 +244,7 @@ public class OracleHybridReplicationImpl
                         return replicateTablesHybrid(
                                 source,
                                 sqlObjects,
+                                sqlObjectsLegacy,
                                 sqlColumns,
                                 sqlConstraints,
                                 sqlFastViews,
@@ -392,6 +397,7 @@ public class OracleHybridReplicationImpl
     private long replicateTablesHybrid(
             SourceConnection source,
             String sqlObjects,
+            String sqlObjectsLegacy,
             String sqlColumns,
             String sqlConstraints,
             String sqlFastViews,
@@ -415,10 +421,12 @@ public class OracleHybridReplicationImpl
                     Connection sourceConnection =
                             sourceConnectionFactory.open(source)
             ) {
-                snapshot = hybridCopyStreamer.loadObjects(
-                        sourceConnection,
+                snapshot = loadObjectsWithFallback(
+                        source,
                         sqlObjects,
-                        exclusionRules
+                        sqlObjectsLegacy,
+                        exclusionRules,
+                        serviceName
                 );
             }
 
@@ -682,6 +690,118 @@ public class OracleHybridReplicationImpl
                     e
             );
         }
+    }
+
+    private Snapshot loadObjectsWithFallback(
+            SourceConnection source,
+            String primarySql,
+            String fallbackSql,
+            MetadataExclusionRules exclusionRules,
+            String serviceName) {
+
+        try (
+                Connection connection =
+                        sourceConnectionFactory.open(source)
+        ) {
+
+            return hybridCopyStreamer.loadObjects(
+                    connection,
+                    primarySql,
+                    exclusionRules
+            );
+
+        } catch (Exception e) {
+
+            if (!isOracleMaintainedUnsupported(e)) {
+                throw propagateObjectLoadException(e);
+            }
+
+            log.warn(
+                    "Oracle ORACLE_MAINTAINED is not supported. "
+                            + "Retrying object catalog with legacy schema filtering. "
+                            + "serviceName={}",
+                    serviceName
+            );
+        }
+
+        /*
+        * Новое connection намеренно:
+        * после JDBC SQL exception не полагаемся на состояние
+        * предыдущего Oracle connection.
+        */
+        try (
+                Connection connection =
+                        sourceConnectionFactory.open(source)
+        ) {
+
+            Snapshot snapshot =
+                    hybridCopyStreamer.loadObjects(
+                            connection,
+                            fallbackSql,
+                            exclusionRules
+                    );
+
+            log.info(
+                    "Oracle HYBRID object catalog loaded "
+                            + "using legacy schema fallback. "
+                            + "serviceName={}, objects={}",
+                    serviceName,
+                    snapshot.size()
+            );
+
+            return snapshot;
+
+        } catch (Exception fallbackException) {
+
+            throw new MetadataReplicationException(
+                    "Oracle HYBRID object catalog fallback failed. "
+                            + "serviceName=" + serviceName,
+                    fallbackException
+            );
+        }
+    }
+
+    private boolean isOracleMaintainedUnsupported(
+            Throwable throwable) {
+
+        Throwable current = throwable;
+
+        while (current != null) {
+
+            if (current instanceof java.sql.SQLException sqlException) {
+
+                /*
+                * ORA-00904 = errorCode 904.
+                */
+                if (sqlException.getErrorCode() == 904) {
+
+                    String message =
+                            sqlException.getMessage();
+
+                    return message != null
+                            && message
+                                .toUpperCase(java.util.Locale.ROOT)
+                                .contains("ORACLE_MAINTAINED");
+                }
+            }
+
+            current = current.getCause();
+        }
+
+        return false;
+    }
+
+    private MetadataReplicationException propagateObjectLoadException(
+            Exception e) {
+
+        if (e instanceof MetadataReplicationException mre) {
+            return mre;
+        }
+
+        return new MetadataReplicationException(
+                "Oracle HYBRID object catalog load failed",
+                e
+        );
     }
 
     private void validateSource(SourceConnection source) {
