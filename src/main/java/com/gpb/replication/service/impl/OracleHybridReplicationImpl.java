@@ -11,6 +11,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -56,6 +58,18 @@ public class OracleHybridReplicationImpl
     private final int parallelism;
     private final boolean allowEmptyObjectSnapshot;
     private final MetadataExclusionProvider metadataExclusionProvider;
+
+    private static final Pattern ORACLE_MAINTAINED_PREDICATE =
+            Pattern.compile(
+                    "(?i)\\b([A-Za-z_][A-Za-z0-9_$#]*)"
+                            + "\\s*\\.\\s*oracle_maintained"
+                            + "\\s*=\\s*'N'"
+            );
+
+    private static final Pattern ORACLE_MAINTAINED_TOKEN =
+            Pattern.compile(
+                    "(?i)\\boracle_maintained\\b"
+            );
 
     public OracleHybridReplicationImpl(
             SqlQueryProvider sqlQueryProvider,
@@ -346,36 +360,46 @@ public class OracleHybridReplicationImpl
             MetricCounter counter,
             MetadataExclusionRules exclusionRules) {
 
-        String databaseName = database.databaseName();
+        String databaseName =
+                database.databaseName();
 
-        try (
-                Connection sourceConnection =
-                        sourceConnectionFactory.open(source)
-        ) {
-            long count = inTargetTransaction(
-                    targetConnection -> {
-                        metadataRepository.deleteSchemaMetadata(
-                                serviceName,
-                                databaseName,
-                                DatabaseType.ORACLE
-                        );
+        try {
 
-                        return standardCopyStreamer.streamSchemas(
-                                sourceConnection,
-                                targetConnection,
-                                sql,
-                                serviceName,
-                                database,
-                                exclusionRules
-                        );
-                    }
-            );
+            long count =
+                    executeWithOracleLegacyFallback(
+                            source,
+                            sql,
+                            "SCHEMAS",
+                            (sourceConnection, effectiveSql) ->
+                                    inTargetTransaction(
+                                            targetConnection -> {
+                                                metadataRepository
+                                                        .deleteSchemaMetadata(
+                                                                serviceName,
+                                                                databaseName,
+                                                                DatabaseType.ORACLE
+                                                        );
+                                                return standardCopyStreamer
+                                                        .streamSchemas(
+                                                                sourceConnection,
+                                                                targetConnection,
+                                                                effectiveSql,
+                                                                serviceName,
+                                                                database,
+                                                                exclusionRules
+                                                        );
+                                            }
+                                    )
+                    );
 
             counter.success(count);
+
             return count;
 
         } catch (Exception e) {
+
             counter.error();
+
             log.error(
                     "Oracle HYBRID replication error. "
                             + "entityType=SCHEMA, entityName={}.*, "
@@ -385,6 +409,7 @@ public class OracleHybridReplicationImpl
                     serviceName,
                     e
             );
+
             return 0;
         }
     }
@@ -543,24 +568,28 @@ public class OracleHybridReplicationImpl
                         * ORACLE_MAINTAINED здесь нет,
                         * поэтому fallback не нужен.
                         */
-                        () -> withSourceConnection(
+                        () -> executeWithOracleLegacyFallback(
                                 source,
-                                connection ->
+                                sqlColumns,
+                                "COLUMNS",
+                                (connection, effectiveSql) ->
                                         hybridCopyStreamer.loadColumns(
                                                 connection,
-                                                sqlColumns,
+                                                effectiveSql,
                                                 snapshot
                                         )
                         ),
                         /*
                         * CONSTRAINTS
                         */
-                        () -> withSourceConnection(
+                        () -> executeWithOracleLegacyFallback(
                                 source,
-                                connection ->
+                                sqlConstraints,
+                                "CONSTRAINTS",
+                                (connection, effectiveSql) ->
                                         hybridCopyStreamer.loadConstraints(
                                                 connection,
-                                                sqlConstraints,
+                                                effectiveSql,
                                                 snapshot
                                         )
                         ),
@@ -668,19 +697,6 @@ public class OracleHybridReplicationImpl
         } finally {
 
             executor.shutdownNow();
-        }
-    }
-
-    private LoadResult withSourceConnection(
-            SourceConnection source,
-            SourceLoadWork work)
-            throws Exception {
-
-        try (
-                Connection connection =
-                        sourceConnectionFactory.open(source)
-        ) {
-            return work.execute(connection);
         }
     }
 
@@ -815,7 +831,7 @@ public class OracleHybridReplicationImpl
             throws Exception {
 
         /*
-        * Основная попытка.
+        * PRIMARY
         */
         try (
                 Connection connection =
@@ -843,15 +859,40 @@ public class OracleHybridReplicationImpl
         }
 
         String fallbackSql =
-                buildOracleLegacySql(sql);
+                buildOracleLegacySql(
+                        sql,
+                        stage
+                );
 
         /*
-        * Новое connection обязательно.
+        * Дополнительная страховка непосредственно
+        * перед выполнением.
+        */
+        if (ORACLE_MAINTAINED_TOKEN
+                .matcher(fallbackSql)
+                .find()) {
+
+            throw new MetadataReplicationException(
+                    "Refusing to execute Oracle legacy SQL because "
+                            + "ORACLE_MAINTAINED is still present. "
+                            + "stage=" + stage
+            );
+        }
+
+        /*
+        * FALLBACK — обязательно новое connection.
         */
         try (
                 Connection connection =
                         sourceConnectionFactory.open(source)
         ) {
+
+            log.debug(
+                    "Executing Oracle legacy SQL. "
+                            + "stage={}, serviceName={}",
+                    stage,
+                    source.getServiceName()
+            );
 
             T result =
                     work.execute(
@@ -881,14 +922,103 @@ public class OracleHybridReplicationImpl
     }
 
     private String buildOracleLegacySql(
-            String sql) {
+            String sql,
+            String stage) {
 
-        String sourcePredicate =
-                "u.oracle_maintained = 'N'";
+        if (sql == null || sql.isBlank()) {
+            throw new MetadataReplicationException(
+                    "Oracle legacy fallback cannot be applied: "
+                            + "SQL is empty. stage=" + stage
+            );
+        }
 
-        String legacyPredicate =
-                """
-                u.username NOT IN (
+        Matcher matcher =
+                ORACLE_MAINTAINED_PREDICATE.matcher(sql);
+
+        StringBuffer result =
+                new StringBuffer(sql.length() + 512);
+
+        int replacements = 0;
+
+        while (matcher.find()) {
+
+            String alias =
+                    matcher.group(1);
+
+            String replacement =
+                    buildLegacySchemaPredicate(alias);
+
+            matcher.appendReplacement(
+                    result,
+                    Matcher.quoteReplacement(replacement)
+            );
+
+            replacements++;
+        }
+
+        matcher.appendTail(result);
+
+        String fallbackSql =
+                result.toString();
+
+        boolean changed =
+                !fallbackSql.equals(sql);
+
+        boolean oracleMaintainedRemaining =
+                ORACLE_MAINTAINED_TOKEN
+                        .matcher(fallbackSql)
+                        .find();
+
+        log.warn(
+                "Oracle legacy SQL rewrite. "
+                        + "stage={}, replacements={}, changed={}, "
+                        + "oracleMaintainedRemaining={}",
+                stage,
+                replacements,
+                changed,
+                oracleMaintainedRemaining
+        );
+
+        /*
+        * На DEBUG можно увидеть фактический SQL,
+        * который уйдёт в Oracle.
+        */
+        log.debug(
+                "Oracle legacy SQL after rewrite. stage={}\n{}",
+                stage,
+                fallbackSql
+        );
+
+        if (replacements == 0) {
+
+            throw new MetadataReplicationException(
+                    "Oracle legacy fallback cannot be applied: "
+                            + "ORACLE_MAINTAINED predicate was not replaced. "
+                            + "stage=" + stage
+            );
+        }
+
+        /*
+        * Очень важная защита:
+        * fallback SQL вообще не должен содержать
+        * ORACLE_MAINTAINED.
+        */
+        if (oracleMaintainedRemaining) {
+
+            throw new MetadataReplicationException(
+                    "Oracle legacy fallback SQL still contains "
+                            + "ORACLE_MAINTAINED. stage=" + stage
+            );
+        }
+
+        return fallbackSql;
+    }
+
+    private String buildLegacySchemaPredicate(
+            String alias) {
+
+        return """
+                %s.username NOT IN (
                     'SYS',
                     'SYSTEM',
                     'OUTLN',
@@ -910,19 +1040,7 @@ public class OracleHybridReplicationImpl
                     'DVF',
                     'DVSYS'
                 )
-                """;
-
-        if (!sql.contains(sourcePredicate)) {
-            throw new MetadataReplicationException(
-                    "Oracle legacy fallback cannot be applied: "
-                            + "ORACLE_MAINTAINED predicate not found"
-            );
-        }
-
-        return sql.replace(
-                sourcePredicate,
-                legacyPredicate
-        );
+                """.formatted(alias);
     }
 
     private void validateSource(SourceConnection source) {
