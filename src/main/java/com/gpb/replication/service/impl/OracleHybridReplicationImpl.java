@@ -11,8 +11,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -35,6 +33,8 @@ import com.gpb.replication.metrics.enums.IngestionMetricJob;
 import com.gpb.replication.repository.MetadataRepository;
 import com.gpb.replication.service.IngestionMetricService;
 import com.gpb.replication.service.ReplicationService;
+import com.gpb.replication.stream.oracle.OracleCapabilities;
+import com.gpb.replication.stream.oracle.OracleCompatibilityService;
 import com.gpb.replication.stream.oracle.OracleHybridMetadataCopyStreamer;
 import com.gpb.replication.stream.oracle.OracleHybridMetadataCopyStreamer.LoadResult;
 import com.gpb.replication.stream.oracle.OracleHybridMetadataCopyStreamer.Snapshot;
@@ -53,39 +53,47 @@ public class OracleHybridReplicationImpl
     private static final int DETAIL_WORKERS = 4;
 
     private final SqlQueryProvider sqlQueryProvider;
+
     private final OracleMetadataCopyStreamer standardCopyStreamer;
+
     private final OracleHybridMetadataCopyStreamer hybridCopyStreamer;
-    private final int parallelism;
-    private final boolean allowEmptyObjectSnapshot;
+
+    private final OracleCompatibilityService compatibilityService;
+
     private final MetadataExclusionProvider metadataExclusionProvider;
 
-    private static final Pattern ORACLE_MAINTAINED_PREDICATE =
-            Pattern.compile(
-                    "(?i)\\b([A-Za-z_][A-Za-z0-9_$#]*)"
-                            + "\\s*\\.\\s*oracle_maintained"
-                            + "\\s*=\\s*'N'"
-            );
+    private final int parallelism;
 
-    private static final Pattern ORACLE_MAINTAINED_TOKEN =
-            Pattern.compile(
-                    "(?i)\\boracle_maintained\\b"
-            );
+    private final boolean allowEmptyObjectSnapshot;
+
 
     public OracleHybridReplicationImpl(
             SqlQueryProvider sqlQueryProvider,
+
             @Qualifier("jdbcTemplate")
             JdbcTemplate jdbcTemplate,
+
             @Qualifier("transactionManager")
             PlatformTransactionManager transactionManager,
+
             MetadataRepository metadataRepository,
+
             SourceJdbcConnectionFactory sourceConnectionFactory,
+
             IngestionMetricService ingestionMetricService,
+
             OracleMetadataCopyStreamer standardCopyStreamer,
+
             OracleHybridMetadataCopyStreamer hybridCopyStreamer,
+
+            OracleCompatibilityService compatibilityService,
+
             @Value("${replication.oracle.hybrid.parallelism:4}")
             int parallelism,
+
             @Value("${replication.oracle.hybrid.allow-empty-object-snapshot:false}")
             boolean allowEmptyObjectSnapshot,
+
             MetadataExclusionProvider metadataExclusionProvider) {
 
         super(
@@ -97,71 +105,64 @@ public class OracleHybridReplicationImpl
         );
 
         this.sqlQueryProvider = sqlQueryProvider;
+
         this.standardCopyStreamer = standardCopyStreamer;
+
         this.hybridCopyStreamer = hybridCopyStreamer;
-        this.parallelism = Math.max(1, Math.min(parallelism, DETAIL_WORKERS));
-        this.allowEmptyObjectSnapshot = allowEmptyObjectSnapshot;
+
+        this.compatibilityService = compatibilityService;
+
         this.metadataExclusionProvider = metadataExclusionProvider;
+
+        this.parallelism =
+                Math.max(
+                        1,
+                        Math.min(
+                                parallelism,
+                                DETAIL_WORKERS
+                        )
+                );
+
+        this.allowEmptyObjectSnapshot =
+                allowEmptyObjectSnapshot;
     }
+
 
     @Override
     public DatabaseType getDatabaseType() {
         return DatabaseType.ORACLE;
     }
 
+
     @Override
     public ReplicationPipeline getPipeline() {
         return ReplicationPipeline.HYBRID;
     }
+
 
     @Override
     protected void execute(
             SourceConnection source,
             String runId) {
 
-        long started = System.nanoTime();
+        long started =
+                System.nanoTime();
+
         validateSource(source);
+
+        String serviceName =
+                source.getServiceName();
 
         MetadataExclusionRules exclusionRules =
                 metadataExclusionProvider.load(
                         DatabaseType.ORACLE
                 );
 
-        String serviceName = source.getServiceName();
-
-        String sqlDatabase = sqlQueryProvider.getQuery(
-                DatabaseType.ORACLE,
-                MetadataType.DATABASE
-        );
-        String sqlSchema = sqlQueryProvider.getQuery(
-                DatabaseType.ORACLE,
-                MetadataType.SCHEMA
-        );
-
-        String sqlObjects = sqlQueryProvider.getQuery(
-                DatabaseType.ORACLE,
-                "hybrid_objects"
-        );
-        String sqlColumns = sqlQueryProvider.getQuery(
-                DatabaseType.ORACLE,
-                "hybrid_columns"
-        );
-        String sqlConstraints = sqlQueryProvider.getQuery(
-                DatabaseType.ORACLE,
-                "hybrid_constraints"
-        );
-        String sqlFastViews = sqlQueryProvider.getQuery(
-                DatabaseType.ORACLE,
-                "hybrid_view"
-        );
-        String sqlLongViews = sqlQueryProvider.getQuery(
-                DatabaseType.ORACLE,
-                "hybrid_view_long"
-        );
-        String sqlMaterializedViews = sqlQueryProvider.getQuery(
-                DatabaseType.ORACLE,
-                "hybrid_mview"
-        );
+        /*
+         * Загружаем SQL только один раз.
+         */
+        OracleHybridSql rawSql =
+                loadSql();
 
         log.info(
                 "Starting Oracle HYBRID metadata replication. "
@@ -171,112 +172,169 @@ public class OracleHybridReplicationImpl
         );
 
         try {
+
             DatabaseReplicationContext database;
+
+            OracleCapabilities capabilities;
+
             long databaseCount;
 
+            /*
+             * Используем первый connection:
+             *
+             * 1. database metadata
+             * 2. Oracle capabilities
+             * 3. database replication
+             */
             try (
                     Connection sourceConnection =
-                            sourceConnectionFactory.open(source)
+                            sourceConnectionFactory.open(
+                                    source
+                            )
             ) {
-                database = resolveDatabase(
-                        sourceConnection,
-                        sqlDatabase,
-                        serviceName
-                );
-
-                databaseCount = ingestionMetricService.execute(
-                        runId,
-                        IngestionMetricJob.DATABASE_REPLICATION,
-                        counter -> replicateDatabase(
+                database =
+                        resolveDatabase(
                                 sourceConnection,
-                                sqlDatabase,
-                                serviceName,
-                                counter
-                        )
-                );
+                                rawSql.database(),
+                                serviceName
+                        );
+
+                capabilities =
+                        compatibilityService.detect(
+                                sourceConnection
+                        );
+
+                databaseCount =
+                        ingestionMetricService.execute(
+                                runId,
+                                IngestionMetricJob.DATABASE_REPLICATION,
+                                counter ->
+                                        replicateDatabase(
+                                                sourceConnection,
+                                                rawSql.database(),
+                                                serviceName,
+                                                counter
+                                        )
+                        );
             }
 
-            boolean databaseSnapshotCommitted = databaseCount == 1;
+            /*
+             * После capability detection готовим SQL,
+             * который гарантированно подходит
+             * конкретной версии Oracle.
+             */
+            OracleHybridSql sql =
+                    prepareSql(
+                            rawSql,
+                            capabilities
+                    );
+
+            log.info(
+                    "Oracle HYBRID effective mode. "
+                            + "serviceName={}, "
+                            + "oracleMaintainedSupported={}",
+                    serviceName,
+                    capabilities.oracleMaintainedSupported()
+            );
+
+            boolean databaseSnapshotCommitted =
+                    databaseCount == 1;
+
             List<String> currentDatabaseNames =
-                    List.of(database.databaseName());
+                    List.of(
+                            database.databaseName()
+                    );
 
-            long schemaCount = ingestionMetricService.execute(
-                    runId,
-                    IngestionMetricJob.SCHEMA_REPLICATION,
-                    counter -> {
-                        if (databaseSnapshotCommitted) {
-                            cleanupStaleSchemas(
-                                    serviceName,
-                                    currentDatabaseNames,
-                                    DatabaseType.ORACLE,
-                                    counter
-                            );
-                        } else {
-                            log.warn(
-                                    "Skipping stale SCHEMA cleanup because "
-                                            + "DATABASE snapshot was not committed. "
-                                            + "serviceName={}",
-                                    serviceName
-                            );
-                        }
+            /*
+             * SCHEMAS
+             */
+            long schemaCount =
+                    ingestionMetricService.execute(
+                            runId,
+                            IngestionMetricJob.SCHEMA_REPLICATION,
+                            counter -> {
 
-                        return replicateSchemas(
-                                source,
-                                sqlSchema,
-                                serviceName,
-                                database,
-                                counter,
-                                exclusionRules
-                        );
-                    }
-            );
+                                if (databaseSnapshotCommitted) {
 
-            long tableCount = ingestionMetricService.execute(
-                    runId,
-                    IngestionMetricJob.TABLE_REPLICATION,
-                    counter -> {
-                        if (databaseSnapshotCommitted) {
-                            cleanupStaleTables(
-                                    serviceName,
-                                    currentDatabaseNames,
-                                    DatabaseType.ORACLE,
-                                    counter
-                            );
-                        } else {
-                            log.warn(
-                                    "Skipping stale TABLE cleanup because "
-                                            + "DATABASE snapshot was not committed. "
-                                            + "serviceName={}",
-                                    serviceName
-                            );
-                        }
+                                    cleanupStaleSchemas(
+                                            serviceName,
+                                            currentDatabaseNames,
+                                            DatabaseType.ORACLE,
+                                            counter
+                                    );
 
-                        return replicateTablesHybrid(
-                                source,
-                                sqlObjects,
-                                sqlColumns,
-                                sqlConstraints,
-                                sqlFastViews,
-                                sqlLongViews,
-                                sqlMaterializedViews,
-                                serviceName,
-                                database,
-                                counter,
-                                exclusionRules
-                        );
-                    }
-            );
+                                } else {
 
-            ReplicationStats stats = new ReplicationStats(
-                    databaseCount,
-                    schemaCount,
-                    tableCount
-            );
+                                    log.warn(
+                                            "Skipping stale SCHEMA cleanup because "
+                                                    + "DATABASE snapshot was not committed. "
+                                                    + "serviceName={}",
+                                            serviceName
+                                    );
+                                }
+
+                                return replicateSchemas(
+                                        source,
+                                        sql.schema(),
+                                        serviceName,
+                                        database,
+                                        counter,
+                                        exclusionRules
+                                );
+                            }
+                    );
+
+            /*
+             * TABLES / VIEWS
+             */
+            long tableCount =
+                    ingestionMetricService.execute(
+                            runId,
+                            IngestionMetricJob.TABLE_REPLICATION,
+                            counter -> {
+
+                                if (databaseSnapshotCommitted) {
+
+                                    cleanupStaleTables(
+                                            serviceName,
+                                            currentDatabaseNames,
+                                            DatabaseType.ORACLE,
+                                            counter
+                                    );
+
+                                } else {
+
+                                    log.warn(
+                                            "Skipping stale TABLE cleanup because "
+                                                    + "DATABASE snapshot was not committed. "
+                                                    + "serviceName={}",
+                                            serviceName
+                                    );
+                                }
+
+                                return replicateTablesHybrid(
+                                        source,
+                                        sql,
+                                        serviceName,
+                                        database,
+                                        counter,
+                                        exclusionRules
+                                );
+                            }
+                    );
+
+            ReplicationStats stats =
+                    new ReplicationStats(
+                            databaseCount,
+                            schemaCount,
+                            tableCount
+                    );
 
             log.info(
                     "Oracle HYBRID metadata replication completed. "
                             + "serviceName={}, database={}, "
-                            + "databases={}, schemas={}, tablesAndViews={}, elapsedMs={}",
+                            + "databases={}, schemas={}, "
+                            + "tablesAndViews={}, elapsedMs={}",
                     serviceName,
                     database.databaseName(),
                     stats.databases(),
@@ -286,26 +344,128 @@ public class OracleHybridReplicationImpl
             );
 
         } catch (MetadataReplicationException e) {
+
             log.error(
-                    "Oracle HYBRID metadata replication failed. serviceName={}",
+                    "Oracle HYBRID metadata replication failed. "
+                            + "serviceName={}",
                     serviceName,
                     e
             );
+
             throw e;
 
         } catch (Exception e) {
+
             log.error(
-                    "Oracle HYBRID metadata replication failed. serviceName={}",
+                    "Oracle HYBRID metadata replication failed. "
+                            + "serviceName={}",
                     serviceName,
                     e
             );
+
             throw new MetadataReplicationException(
-                    "Oracle HYBRID metadata replication failed: " + serviceName,
+                    "Oracle HYBRID metadata replication failed: "
+                            + serviceName,
                     e
             );
         }
     }
 
+    /*
+     * ---------------------------------------------------------------------
+     * SQL
+     * ---------------------------------------------------------------------
+     */
+    private OracleHybridSql loadSql() {
+
+        return new OracleHybridSql(
+                sqlQueryProvider.getQuery(
+                        DatabaseType.ORACLE,
+                        MetadataType.DATABASE
+                ),
+
+                sqlQueryProvider.getQuery(
+                        DatabaseType.ORACLE,
+                        MetadataType.SCHEMA
+                ),
+
+                sqlQueryProvider.getQuery(
+                        DatabaseType.ORACLE,
+                        "hybrid_objects"
+                ),
+
+                sqlQueryProvider.getQuery(
+                        DatabaseType.ORACLE,
+                        "hybrid_columns"
+                ),
+
+                sqlQueryProvider.getQuery(
+                        DatabaseType.ORACLE,
+                        "hybrid_constraints"
+                ),
+
+                sqlQueryProvider.getQuery(
+                        DatabaseType.ORACLE,
+                        "hybrid_view"
+                ),
+
+                sqlQueryProvider.getQuery(
+                        DatabaseType.ORACLE,
+                        "hybrid_mview"
+                )
+        );
+    }
+
+    private OracleHybridSql prepareSql(
+            OracleHybridSql raw,
+            OracleCapabilities capabilities) {
+
+        return new OracleHybridSql(
+                raw.database(),
+
+                compatibilityService.applySchemaCompatibility(
+                        raw.schema(),
+                        capabilities,
+                        "SCHEMAS"
+                ),
+
+                compatibilityService.applySchemaCompatibility(
+                        raw.objects(),
+                        capabilities,
+                        "OBJECTS"
+                ),
+
+                compatibilityService.applySchemaCompatibility(
+                        raw.columns(),
+                        capabilities,
+                        "COLUMNS"
+                ),
+
+                compatibilityService.applySchemaCompatibility(
+                        raw.constraints(),
+                        capabilities,
+                        "CONSTRAINTS"
+                ),
+
+                compatibilityService.applySchemaCompatibility(
+                        raw.views(),
+                        capabilities,
+                        "VIEWS"
+                ),
+
+                compatibilityService.applySchemaCompatibility(
+                        raw.materializedViews(),
+                        capabilities,
+                        "MVIEW"
+                )
+        );
+    }
+
+    /*
+     * ---------------------------------------------------------------------
+     * DATABASE
+     * ---------------------------------------------------------------------
+     */
     private long replicateDatabase(
             Connection sourceConnection,
             String sql,
@@ -313,45 +473,64 @@ public class OracleHybridReplicationImpl
             MetricCounter counter) {
 
         try {
-            long count = inTargetTransaction(
-                    targetConnection -> {
-                        metadataRepository.deleteDatabaseMetadata(
-                                serviceName,
-                                DatabaseType.ORACLE
-                        );
+            long count =
+                    inTargetTransaction(
+                            targetConnection -> {
 
-                        long copied = standardCopyStreamer.streamDatabases(
-                                sourceConnection,
-                                targetConnection,
-                                sql,
-                                serviceName
-                        );
+                                metadataRepository
+                                        .deleteDatabaseMetadata(
+                                                serviceName,
+                                                DatabaseType.ORACLE
+                                        );
 
-                        if (copied != 1) {
-                            throw new MetadataReplicationException(
-                                    "Expected exactly one Oracle database, but received "
-                                            + copied
-                            );
-                        }
-                        return copied;
-                    }
+                                long copied =
+                                        standardCopyStreamer
+                                                .streamDatabases(
+                                                        sourceConnection,
+                                                        targetConnection,
+                                                        sql,
+                                                        serviceName
+                                                );
+
+                                if (copied != 1) {
+
+                                    throw new MetadataReplicationException(
+                                            "Expected exactly one Oracle database, "
+                                                    + "but received "
+                                                    + copied
+                                    );
+                                }
+
+                                return copied;
+                            }
+                    );
+
+            counter.success(
+                    count
             );
 
-            counter.success(count);
             return count;
 
         } catch (Exception e) {
+
             counter.error();
+
             log.error(
                     "Oracle HYBRID replication error. "
                             + "entityType=DATABASE, serviceName={}",
                     serviceName,
                     e
             );
+
             return 0;
         }
     }
 
+    /*
+     * ---------------------------------------------------------------------
+     * SCHEMAS
+     * ---------------------------------------------------------------------
+     */
     private long replicateSchemas(
             SourceConnection source,
             String sql,
@@ -363,36 +542,39 @@ public class OracleHybridReplicationImpl
         String databaseName =
                 database.databaseName();
 
-        try {
+        try (
+                Connection sourceConnection =
+                        sourceConnectionFactory.open(
+                                source
+                        )
+        ) {
 
             long count =
-                    executeWithOracleLegacyFallback(
-                            source,
-                            sql,
-                            "SCHEMAS",
-                            (sourceConnection, effectiveSql) ->
-                                    inTargetTransaction(
-                                            targetConnection -> {
-                                                metadataRepository
-                                                        .deleteSchemaMetadata(
-                                                                serviceName,
-                                                                databaseName,
-                                                                DatabaseType.ORACLE
-                                                        );
-                                                return standardCopyStreamer
-                                                        .streamSchemas(
-                                                                sourceConnection,
-                                                                targetConnection,
-                                                                effectiveSql,
-                                                                serviceName,
-                                                                database,
-                                                                exclusionRules
-                                                        );
-                                            }
-                                    )
+                    inTargetTransaction(
+                            targetConnection -> {
+
+                                metadataRepository
+                                        .deleteSchemaMetadata(
+                                                serviceName,
+                                                databaseName,
+                                                DatabaseType.ORACLE
+                                        );
+
+                                return standardCopyStreamer
+                                        .streamSchemas(
+                                                sourceConnection,
+                                                targetConnection,
+                                                sql,
+                                                serviceName,
+                                                database,
+                                                exclusionRules
+                                        );
+                            }
                     );
 
-            counter.success(count);
+            counter.success(
+                    count
+            );
 
             return count;
 
@@ -402,9 +584,8 @@ public class OracleHybridReplicationImpl
 
             log.error(
                     "Oracle HYBRID replication error. "
-                            + "entityType=SCHEMA, entityName={}.*, "
-                            + "database={}, serviceName={}",
-                    databaseName,
+                            + "entityType=SCHEMA, database={}, "
+                            + "serviceName={}",
                     databaseName,
                     serviceName,
                     e
@@ -414,67 +595,84 @@ public class OracleHybridReplicationImpl
         }
     }
 
+    /*
+     * ---------------------------------------------------------------------
+     * TABLES / VIEWS
+     * ---------------------------------------------------------------------
+     */
+
     private long replicateTablesHybrid(
             SourceConnection source,
-            String sqlObjects,
-            String sqlColumns,
-            String sqlConstraints,
-            String sqlFastViews,
-            String sqlLongViews,
-            String sqlMaterializedViews,
+            OracleHybridSql sql,
             String serviceName,
             DatabaseReplicationContext database,
             MetricCounter counter,
             MetadataExclusionRules exclusionRules) {
 
-        long started = System.nanoTime();
+        long started =
+                System.nanoTime();
 
         try {
-            Snapshot snapshot;
 
             /*
-             * Phase 1: дешёвый catalog scan.
-             * Target transaction ещё не начата.
+             * Phase 1.
+             *
+             * Полный catalog объектов.
+             * Target PostgreSQL transaction
+             * ещё не открыта.
              */
+            Snapshot snapshot;
+
             try (
                     Connection sourceConnection =
-                            sourceConnectionFactory.open(source)
+                            sourceConnectionFactory.open(
+                                    source
+                            )
             ) {
-                snapshot = loadObjectsWithFallback(
-                        source,
-                        sqlObjects,
-                        exclusionRules,
-                        serviceName
-                );
+
+                snapshot =
+                        hybridCopyStreamer.loadObjects(
+                                sourceConnection,
+                                sql.objects(),
+                                exclusionRules
+                        );
             }
 
-            if (snapshot.size() == 0 && !allowEmptyObjectSnapshot) {
+            if (snapshot.size() == 0
+                    && !allowEmptyObjectSnapshot) {
+
                 throw new MetadataReplicationException(
                         "Oracle HYBRID object snapshot is empty. "
                                 + "Refusing to replace existing TABLE snapshot. "
-                                + "serviceName=" + serviceName
+                                + "serviceName="
+                                + serviceName
                 );
             }
 
             /*
-             * Phase 2: четыре независимых source worker-а.
+             * Phase 2.
+             *
+             * COLUMNS
+             * CONSTRAINTS
+             * VIEW_FAST
+             * VIEW_LONG
+             * MVIEW
              */
             runDetailWorkers(
                     source,
                     snapshot,
-                    sqlColumns,
-                    sqlConstraints,
-                    sqlFastViews,
-                    sqlLongViews,
-                    sqlMaterializedViews
+                    sql
             );
 
-            SnapshotSummary summary = snapshot.summary();
+            SnapshotSummary summary =
+                    snapshot.summary();
 
             log.info(
                     "Oracle HYBRID extraction completed. "
-                            + "serviceName={}, database={}, total={}, tables={}, "
-                            + "views={}, mviews={}, viewsWithoutDefinition={}, elapsedMs={}",
+                            + "serviceName={}, database={}, "
+                            + "total={}, tables={}, views={}, "
+                            + "mviews={}, viewsWithoutDefinition={}, "
+                            + "elapsedMs={}",
                     serviceName,
                     database.databaseName(),
                     summary.total(),
@@ -486,41 +684,54 @@ public class OracleHybridReplicationImpl
             );
 
             /*
-             * Phase 3: только теперь открываем короткую target transaction.
-             * Если extraction выше упал, старый snapshot не затрагивается.
+             * Phase 3.
+             *
+             * Только после успешного extraction
+             * заменяем snapshot в PostgreSQL.
              */
-            long count = inTargetTransaction(
-                    targetConnection -> {
-                        metadataRepository.deleteTableMetadata(
-                                serviceName,
-                                database.databaseName(),
-                                DatabaseType.ORACLE
-                        );
+            long count =
+                    inTargetTransaction(
+                            targetConnection -> {
 
-                        long copied = hybridCopyStreamer.copyTables(
-                                targetConnection,
-                                snapshot,
-                                serviceName,
-                                database
-                        );
+                                metadataRepository
+                                        .deleteTableMetadata(
+                                                serviceName,
+                                                database.databaseName(),
+                                                DatabaseType.ORACLE
+                                        );
 
-                        if (copied != snapshot.size()) {
-                            throw new MetadataReplicationException(
-                                    "Oracle HYBRID table count mismatch. expected="
-                                            + snapshot.size()
-                                            + ", copied=" + copied
-                            );
-                        }
+                                long copied =
+                                        hybridCopyStreamer
+                                                .copyTables(
+                                                        targetConnection,
+                                                        snapshot,
+                                                        serviceName,
+                                                        database
+                                                );
 
-                        return copied;
-                    }
+                                if (copied != snapshot.size()) {
+
+                                    throw new MetadataReplicationException(
+                                            "Oracle HYBRID table count mismatch. "
+                                                    + "expected="
+                                                    + snapshot.size()
+                                                    + ", copied="
+                                                    + copied
+                                    );
+                                }
+
+                                return copied;
+                            }
+                    );
+
+            counter.success(
+                    count
             );
-
-            counter.success(count);
 
             log.info(
                     "Oracle HYBRID TABLE snapshot committed. "
-                            + "serviceName={}, database={}, count={}, totalElapsedMs={}",
+                            + "serviceName={}, database={}, count={}, "
+                            + "totalElapsedMs={}",
                     serviceName,
                     database.databaseName(),
                     count,
@@ -530,28 +741,32 @@ public class OracleHybridReplicationImpl
             return count;
 
         } catch (Exception e) {
+
             counter.error();
+
             log.error(
                     "Oracle HYBRID replication error. "
-                            + "entityType=TABLE, entityName={}.*, "
-                            + "database={}, serviceName={}",
-                    database.databaseName(),
+                            + "entityType=TABLE, database={}, "
+                            + "serviceName={}",
                     database.databaseName(),
                     serviceName,
                     e
             );
+
             return 0;
         }
     }
 
+    /*
+     * ---------------------------------------------------------------------
+     * DETAIL WORKERS
+     * ---------------------------------------------------------------------
+     */
+
     private void runDetailWorkers(
             SourceConnection source,
             Snapshot snapshot,
-            String sqlColumns,
-            String sqlConstraints,
-            String sqlFastViews,
-            String sqlLongViews,
-            String sqlMaterializedViews) {
+            OracleHybridSql sql) {
 
         ExecutorService executor =
                 Executors.newFixedThreadPool(
@@ -560,129 +775,85 @@ public class OracleHybridReplicationImpl
                 );
 
         List<Callable<LoadResult>> tasks =
-                List.of(
+        List.of(
 
-                        /*
-                        * COLUMNS
-                        *
-                        * ORACLE_MAINTAINED здесь нет,
-                        * поэтому fallback не нужен.
-                        */
-                        () -> executeWithOracleLegacyFallback(
-                                source,
-                                sqlColumns,
-                                "COLUMNS",
-                                (connection, effectiveSql) ->
-                                        hybridCopyStreamer.loadColumns(
+                () -> withSourceConnection(
+                        source,
+                        connection ->
+                                hybridCopyStreamer
+                                        .loadColumns(
                                                 connection,
-                                                effectiveSql,
+                                                sql.columns(),
                                                 snapshot
                                         )
-                        ),
-                        /*
-                        * CONSTRAINTS
-                        */
-                        () -> executeWithOracleLegacyFallback(
-                                source,
-                                sqlConstraints,
-                                "CONSTRAINTS",
-                                (connection, effectiveSql) ->
-                                        hybridCopyStreamer.loadConstraints(
+                ),
+
+                () -> withSourceConnection(
+                        source,
+                        connection ->
+                                hybridCopyStreamer
+                                        .loadConstraints(
                                                 connection,
-                                                effectiveSql,
+                                                sql.constraints(),
                                                 snapshot
                                         )
-                        ),
-                        /*
-                        * FAST VIEW
-                        */
-                        () -> executeWithOracleLegacyFallback(
-                                source,
-                                sqlFastViews,
-                                "VIEW_FAST",
-                                (connection, effectiveSql) ->
-                                        hybridCopyStreamer.loadFastViews(
+                ),
+
+                () -> withSourceConnection(
+                        source,
+                        connection ->
+                                hybridCopyStreamer
+                                        .loadViews(
                                                 connection,
-                                                effectiveSql,
+                                                sql.views(),
                                                 snapshot
                                         )
-                        ),
-                        /*
-                        * LONG VIEW + MATERIALIZED VIEW
-                        * Они остаются в одном worker-е,
-                        * чтобы сохранить текущий лимит
-                        * DETAIL_WORKERS = 4.
-                        */
-                        () -> {
-                            LoadResult longViews =
-                                    executeWithOracleLegacyFallback(
-                                            source,
-                                            sqlLongViews,
-                                            "VIEW_LONG",
-                                            (connection, effectiveSql) ->
-                                                    hybridCopyStreamer
-                                                            .loadLongViews(
-                                                                    connection,
-                                                                    effectiveSql,
-                                                                    snapshot
-                                                            )
-                                    );
-                            LoadResult mviews =
-                                    executeWithOracleLegacyFallback(
-                                            source,
-                                            sqlMaterializedViews,
-                                            "MVIEW",
-                                            (connection, effectiveSql) ->
-                                                    hybridCopyStreamer
-                                                            .loadMaterializedViews(
-                                                                    connection,
-                                                                    effectiveSql,
-                                                                    snapshot
-                                                            )
-                                    );
-                            return LoadResult.combine(
-                                    "VIEW_LONG+MVIEW",
-                                    longViews,
-                                    mviews
-                            );
-                        }
-                );
+                ),
+
+                () -> withSourceConnection(
+                        source,
+                        connection ->
+                                hybridCopyStreamer
+                                        .loadMaterializedViews(
+                                                connection,
+                                                sql.materializedViews(),
+                                                snapshot
+                                        )
+                )
+        );
+
+        executeWorkers(
+                executor,
+                tasks
+        );
+    }
+
+    private void executeWorkers(
+            ExecutorService executor,
+            List<Callable<LoadResult>> tasks) {
 
         try {
 
             List<Future<LoadResult>> futures =
-                    executor.invokeAll(tasks);
+                    executor.invokeAll(
+                            tasks
+                    );
 
             for (Future<LoadResult> future : futures) {
 
-                try {
+                LoadResult result =
+                        getWorkerResult(
+                                future
+                        );
 
-                    LoadResult result =
-                            future.get();
-
-                    log.debug(
-                            "Oracle HYBRID worker finished. "
-                                    + "stage={}, rows={}, applied={}, skipped={}",
-                            result.stage(),
-                            result.rows(),
-                            result.applied(),
-                            result.skipped()
-                    );
-
-                } catch (ExecutionException e) {
-
-                    Throwable cause =
-                            e.getCause();
-
-                    if (cause instanceof RuntimeException runtimeException) {
-                        throw runtimeException;
-                    }
-
-                    throw new MetadataReplicationException(
-                            "Oracle HYBRID detail worker failed",
-                            cause
-                    );
-                }
+                log.debug(
+                        "Oracle HYBRID worker finished. "
+                                + "stage={}, rows={}, applied={}, skipped={}",
+                        result.stage(),
+                        result.rows(),
+                        result.applied(),
+                        result.skipped()
+                );
             }
 
         } catch (InterruptedException e) {
@@ -700,6 +871,62 @@ public class OracleHybridReplicationImpl
         }
     }
 
+    private LoadResult getWorkerResult(
+            Future<LoadResult> future) {
+
+        try {
+
+            return future.get();
+
+        } catch (InterruptedException e) {
+
+            Thread.currentThread().interrupt();
+
+            throw new MetadataReplicationException(
+                    "Oracle HYBRID worker interrupted",
+                    e
+            );
+
+        } catch (ExecutionException e) {
+
+            Throwable cause =
+                    e.getCause();
+
+            if (cause instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+
+            throw new MetadataReplicationException(
+                    "Oracle HYBRID detail worker failed",
+                    cause
+            );
+        }
+    }
+
+    private LoadResult withSourceConnection(
+            SourceConnection source,
+            SourceLoadWork work)
+            throws Exception {
+
+        try (
+                Connection connection =
+                        sourceConnectionFactory.open(
+                                source
+                        )
+        ) {
+
+            return work.execute(
+                    connection
+            );
+        }
+    }
+
+    /*
+     * ---------------------------------------------------------------------
+     * DATABASE CONTEXT
+     * ---------------------------------------------------------------------
+     */
+
     private DatabaseReplicationContext resolveDatabase(
             Connection sourceConnection,
             String sqlDatabase,
@@ -713,38 +940,59 @@ public class OracleHybridReplicationImpl
                                 ResultSet.CONCUR_READ_ONLY
                         )
         ) {
-            statement.setFetchSize(1);
 
-            try (ResultSet rs = statement.executeQuery()) {
+            statement.setFetchSize(
+                    1
+            );
+
+            try (
+                    ResultSet rs =
+                            statement.executeQuery()
+            ) {
+
                 if (!rs.next()) {
+
                     throw new MetadataReplicationException(
                             "Oracle database metadata not found"
                     );
                 }
 
-                String databaseName = rs.getString("DB_NAME");
-                if (databaseName == null || databaseName.isBlank()) {
+                String databaseName =
+                        rs.getString(
+                                "DB_NAME"
+                        );
+
+                if (databaseName == null
+                        || databaseName.isBlank()) {
+
                     throw new MetadataReplicationException(
                             "Oracle DB_NAME is empty"
                     );
                 }
 
                 if (rs.next()) {
+
                     throw new MetadataReplicationException(
-                            "More than one database returned for Oracle connection"
+                            "More than one database returned "
+                                    + "for Oracle connection"
                     );
                 }
 
                 return new DatabaseReplicationContext(
                         databaseName,
-                        MetadataFqn.database(serviceName, databaseName)
+                        MetadataFqn.database(
+                                serviceName,
+                                databaseName
+                        )
                 );
             }
 
         } catch (Exception e) {
+
             if (e instanceof MetadataReplicationException mre) {
                 throw mre;
             }
+
             throw new MetadataReplicationException(
                     "Failed to resolve Oracle database",
                     e
@@ -752,313 +1000,37 @@ public class OracleHybridReplicationImpl
         }
     }
 
-    private Snapshot loadObjectsWithFallback(
-            SourceConnection source,
-            String sql,
-            MetadataExclusionRules exclusionRules,
-            String serviceName) {
+    /*
+     * ---------------------------------------------------------------------
+     * VALIDATION
+     * ---------------------------------------------------------------------
+     */
 
-        try {
+    private void validateSource(
+            SourceConnection source) {
 
-            return executeWithOracleLegacyFallback(
-                    source,
-                    sql,
-                    "OBJECTS",
-                    (connection, effectiveSql) ->
-                            hybridCopyStreamer.loadObjects(
-                                    connection,
-                                    effectiveSql,
-                                    exclusionRules
-                            )
-            );
-
-        } catch (MetadataReplicationException e) {
-            throw e;
-
-        } catch (Exception e) {
-
-            throw new MetadataReplicationException(
-                    "Oracle HYBRID object catalog load failed. "
-                            + "serviceName=" + serviceName,
-                    e
-            );
-        }
-    }
-
-    private boolean isOracleMaintainedUnsupported(
-            Throwable throwable) {
-
-        Throwable current = throwable;
-
-        while (current != null) {
-
-            if (current instanceof java.sql.SQLException sqlException) {
-
-                /*
-                * ORA-00904 = errorCode 904.
-                */
-                if (sqlException.getErrorCode() == 904) {
-
-                    String message =
-                            sqlException.getMessage();
-
-                    return message != null
-                            && message
-                                .toUpperCase(java.util.Locale.ROOT)
-                                .contains("ORACLE_MAINTAINED");
-                }
-            }
-
-            current = current.getCause();
-        }
-
-        return false;
-    }
-
-    @FunctionalInterface
-    private interface OracleSqlWork<T> {
-        T execute(
-                Connection connection,
-                String sql)
-                throws Exception;
-    }
-
-    private <T> T executeWithOracleLegacyFallback(
-            SourceConnection source,
-            String sql,
-            String stage,
-            OracleSqlWork<T> work)
-            throws Exception {
-
-        /*
-        * PRIMARY
-        */
-        try (
-                Connection connection =
-                        sourceConnectionFactory.open(source)
-        ) {
-
-            return work.execute(
-                    connection,
-                    sql
-            );
-
-        } catch (Exception e) {
-
-            if (!isOracleMaintainedUnsupported(e)) {
-                throw e;
-            }
-
-            log.warn(
-                    "Oracle ORACLE_MAINTAINED is not supported. "
-                            + "Retrying with legacy schema filtering. "
-                            + "stage={}, serviceName={}",
-                    stage,
-                    source.getServiceName()
-            );
-        }
-
-        String fallbackSql =
-                buildOracleLegacySql(
-                        sql,
-                        stage
-                );
-
-        /*
-        * Дополнительная страховка непосредственно
-        * перед выполнением.
-        */
-        if (ORACLE_MAINTAINED_TOKEN
-                .matcher(fallbackSql)
-                .find()) {
-
-            throw new MetadataReplicationException(
-                    "Refusing to execute Oracle legacy SQL because "
-                            + "ORACLE_MAINTAINED is still present. "
-                            + "stage=" + stage
-            );
-        }
-
-        /*
-        * FALLBACK — обязательно новое connection.
-        */
-        try (
-                Connection connection =
-                        sourceConnectionFactory.open(source)
-        ) {
-
-            log.debug(
-                    "Executing Oracle legacy SQL. "
-                            + "stage={}, serviceName={}",
-                    stage,
-                    source.getServiceName()
-            );
-
-            T result =
-                    work.execute(
-                            connection,
-                            fallbackSql
-                    );
-
-            log.info(
-                    "Oracle legacy schema fallback succeeded. "
-                            + "stage={}, serviceName={}",
-                    stage,
-                    source.getServiceName()
-            );
-
-            return result;
-
-        } catch (Exception fallbackException) {
-
-            throw new MetadataReplicationException(
-                    "Oracle legacy schema fallback failed. "
-                            + "stage=" + stage
-                            + ", serviceName="
-                            + source.getServiceName(),
-                    fallbackException
-            );
-        }
-    }
-
-    private String buildOracleLegacySql(
-            String sql,
-            String stage) {
-
-        if (sql == null || sql.isBlank()) {
-            throw new MetadataReplicationException(
-                    "Oracle legacy fallback cannot be applied: "
-                            + "SQL is empty. stage=" + stage
-            );
-        }
-
-        Matcher matcher =
-                ORACLE_MAINTAINED_PREDICATE.matcher(sql);
-
-        StringBuffer result =
-                new StringBuffer(sql.length() + 512);
-
-        int replacements = 0;
-
-        while (matcher.find()) {
-
-            String alias =
-                    matcher.group(1);
-
-            String replacement =
-                    buildLegacySchemaPredicate(alias);
-
-            matcher.appendReplacement(
-                    result,
-                    Matcher.quoteReplacement(replacement)
-            );
-
-            replacements++;
-        }
-
-        matcher.appendTail(result);
-
-        String fallbackSql =
-                result.toString();
-
-        boolean changed =
-                !fallbackSql.equals(sql);
-
-        boolean oracleMaintainedRemaining =
-                ORACLE_MAINTAINED_TOKEN
-                        .matcher(fallbackSql)
-                        .find();
-
-        log.warn(
-                "Oracle legacy SQL rewrite. "
-                        + "stage={}, replacements={}, changed={}, "
-                        + "oracleMaintainedRemaining={}",
-                stage,
-                replacements,
-                changed,
-                oracleMaintainedRemaining
-        );
-
-        /*
-        * На DEBUG можно увидеть фактический SQL,
-        * который уйдёт в Oracle.
-        */
-        log.debug(
-                "Oracle legacy SQL after rewrite. stage={}\n{}",
-                stage,
-                fallbackSql
-        );
-
-        if (replacements == 0) {
-
-            throw new MetadataReplicationException(
-                    "Oracle legacy fallback cannot be applied: "
-                            + "ORACLE_MAINTAINED predicate was not replaced. "
-                            + "stage=" + stage
-            );
-        }
-
-        /*
-        * Очень важная защита:
-        * fallback SQL вообще не должен содержать
-        * ORACLE_MAINTAINED.
-        */
-        if (oracleMaintainedRemaining) {
-
-            throw new MetadataReplicationException(
-                    "Oracle legacy fallback SQL still contains "
-                            + "ORACLE_MAINTAINED. stage=" + stage
-            );
-        }
-
-        return fallbackSql;
-    }
-
-    private String buildLegacySchemaPredicate(
-            String alias) {
-
-        return """
-                %s.username NOT IN (
-                    'SYS',
-                    'SYSTEM',
-                    'OUTLN',
-                    'DBSNMP',
-                    'SYSMAN',
-                    'MDSYS',
-                    'ORDSYS',
-                    'ORDDATA',
-                    'CTXSYS',
-                    'XDB',
-                    'WMSYS',
-                    'OLAPSYS',
-                    'OWBSYS',
-                    'OWBSYS_AUDIT',
-                    'APPQOSSYS',
-                    'AUDSYS',
-                    'GSMADMIN_INTERNAL',
-                    'OJVMSYS',
-                    'DVF',
-                    'DVSYS'
-                )
-                """.formatted(alias);
-    }
-
-    private void validateSource(SourceConnection source) {
         if (source == null) {
+
             throw new MetadataReplicationException(
                     "Source connection is null"
             );
         }
+
         if (source.getServiceName() == null
                 || source.getServiceName().isBlank()) {
+
             throw new MetadataReplicationException(
                     "Source serviceName is empty"
             );
         }
+
         if (source.getDbType() == null
-                || !DatabaseType.ORACLE.name().equalsIgnoreCase(
-                        source.getDbType()
-                )) {
+                || !DatabaseType.ORACLE
+                        .name()
+                        .equalsIgnoreCase(
+                                source.getDbType()
+                        )) {
+
             throw new MetadataReplicationException(
                     "Expected ORACLE connection, actual="
                             + source.getDbType()
@@ -1066,24 +1038,61 @@ public class OracleHybridReplicationImpl
         }
     }
 
+    /*
+     * ---------------------------------------------------------------------
+     * UTILS
+     * ---------------------------------------------------------------------
+     */
+
     private ThreadFactory oracleHybridThreadFactory() {
-        AtomicInteger counter = new AtomicInteger();
+
+        AtomicInteger counter =
+                new AtomicInteger();
+
         return runnable -> {
-            Thread thread = new Thread(
-                    runnable,
-                    "oracle-hybrid-detail-" + counter.incrementAndGet()
-            );
+
+            Thread thread =
+                    new Thread(
+                            runnable,
+                            "oracle-hybrid-detail-"
+                                    + counter.incrementAndGet()
+                    );
+
             thread.setDaemon(false);
+
             return thread;
         };
     }
 
-    private long elapsedMs(long started) {
+
+    private long elapsedMs(
+            long started) {
+
         return (System.nanoTime() - started) / 1_000_000;
+    }
+
+
+    /*
+     * ---------------------------------------------------------------------
+     * INTERNAL TYPES
+     * ---------------------------------------------------------------------
+     */
+
+    private record OracleHybridSql(
+            String database,
+            String schema,
+            String objects,
+            String columns,
+            String constraints,
+            String views,
+            String materializedViews) {
     }
 
     @FunctionalInterface
     private interface SourceLoadWork {
-        LoadResult execute(Connection connection) throws Exception;
+
+        LoadResult execute(
+                Connection connection)
+                throws Exception;
     }
 }

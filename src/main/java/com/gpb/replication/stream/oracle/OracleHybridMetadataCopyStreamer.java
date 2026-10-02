@@ -10,7 +10,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicReference;
 
 import org.postgresql.PGConnection;
 import org.postgresql.copy.CopyIn;
@@ -345,35 +344,19 @@ public class OracleHybridMetadataCopyStreamer {
         }
     }
 
-    public LoadResult loadFastViews(
-            Connection connection,
-            String sql,
-            Snapshot snapshot) {
+    public LoadResult loadViews(
+        Connection connection,
+        String sql,
+        Snapshot snapshot) {
 
-        return loadViewDefinitions(
-                connection,
-                sql,
-                snapshot,
-                "VIEW",
-                false,
-                "VIEW_FAST"
-        );
-    }
-
-    public LoadResult loadLongViews(
-            Connection connection,
-            String sql,
-            Snapshot snapshot) {
-
-        return loadViewDefinitions(
-                connection,
-                sql,
-                snapshot,
-                "VIEW",
-                true,
-                "VIEW_LONG"
-        );
-    }
+    return loadViewDefinitions(
+            connection,
+            sql,
+            snapshot,
+            "VIEW",
+            "VIEWS"
+    );
+}
 
     public LoadResult loadMaterializedViews(
             Connection connection,
@@ -385,7 +368,6 @@ public class OracleHybridMetadataCopyStreamer {
                 sql,
                 snapshot,
                 "MATERIALIZED_VIEW",
-                true,
                 "MVIEW"
         );
     }
@@ -447,60 +429,93 @@ public class OracleHybridMetadataCopyStreamer {
             String sql,
             Snapshot snapshot,
             String expectedType,
-            boolean overwrite,
             String stage) {
 
-        long started = System.nanoTime();
+        long started =
+                System.nanoTime();
+
         long rows = 0;
         long applied = 0;
         long skipped = 0;
 
         try (
-                PreparedStatement statement = prepare(connection, sql);
-                ResultSet rs = statement.executeQuery()
+                PreparedStatement statement =
+                        prepare(
+                                connection,
+                                sql
+                        );
+
+                ResultSet rs =
+                        statement.executeQuery()
         ) {
+
             while (rs.next()) {
+
                 rows++;
 
-                String schemaName = requiredString(rs, "SCHEMA_NAME");
-                String tableName = requiredString(rs, "TABLE_NAME");
-
                 /*
-                 * В VIEW_LONG/MVIEW колонка VIEW_DEFINITION = LONG
-                 * и намеренно является последней колонкой SELECT.
-                 */
-                String definition = sanitizePostgresText(
-                        rs.getString(
-                                "VIEW_DEFINITION"
-                        )
-                );
+                * Для LONG важно соблюдать порядок SELECT.
+                *
+                * VIEW_DEFINITION — последняя колонка.
+                */
+                String schemaName =
+                        requiredString(
+                                rs,
+                                "SCHEMA_NAME"
+                        );
 
-                ObjectMetadata object = snapshot.find(
-                        new ObjectKey(schemaName, tableName)
-                );
+                String tableName =
+                        requiredString(
+                                rs,
+                                "TABLE_NAME"
+                        );
+
+                String definition =
+                        sanitizePostgresText(
+                                rs.getString(
+                                        "VIEW_DEFINITION"
+                                )
+                        );
+
+                ObjectMetadata object =
+                        snapshot.find(
+                                new ObjectKey(
+                                        schemaName,
+                                        tableName
+                                )
+                        );
 
                 if (object == null
-                        || !expectedType.equals(object.tableType)) {
+                        || !expectedType.equals(
+                                object.tableType
+                        )) {
+
                     skipped++;
+
                     continue;
                 }
 
-                if (overwrite) {
-                    object.viewDefinition.set(definition);
-                } else {
-                    object.viewDefinition.compareAndSet(null, definition);
-                }
+                object.viewDefinition = definition;
 
                 applied++;
             }
 
             return logResult(
-                    new LoadResult(stage, rows, applied, skipped),
+                    new LoadResult(
+                            stage,
+                            rows,
+                            applied,
+                            skipped
+                    ),
                     started
             );
 
         } catch (Exception e) {
-            throw wrap(stage, e);
+
+            throw wrap(
+                    stage,
+                    e
+            );
         }
     }
 
@@ -527,7 +542,7 @@ public class OracleHybridMetadataCopyStreamer {
         data.put("tableType", object.tableType);
 
         String viewDefinition = sanitizePostgresText(
-                object.viewDefinition.get()
+                object.viewDefinition
         );
                 
         if (viewDefinition == null) {
@@ -761,8 +776,7 @@ public class OracleHybridMetadataCopyStreamer {
 
         private volatile String columnsJson = "[]";
         private volatile String constraintsJson = "[]";
-        private final AtomicReference<String> viewDefinition =
-                new AtomicReference<>();
+        private volatile String viewDefinition;
 
         private ObjectMetadata(
                 long id,
@@ -808,13 +822,13 @@ public class OracleHybridMetadataCopyStreamer {
                     case "REGULAR" -> tables++;
                     case "VIEW" -> {
                         views++;
-                        if (object.viewDefinition.get() == null) {
+                        if (object.viewDefinition == null) {
                             viewsWithoutDefinition++;
                         }
                     }
                     case "MATERIALIZED_VIEW" -> {
                         materializedViews++;
-                        if (object.viewDefinition.get() == null) {
+                        if (object.viewDefinition == null) {
                             viewsWithoutDefinition++;
                         }
                     }
@@ -846,18 +860,5 @@ public class OracleHybridMetadataCopyStreamer {
             long rows,
             long applied,
             long skipped) {
-
-        public static LoadResult combine(
-                String stage,
-                LoadResult first,
-                LoadResult second) {
-
-            return new LoadResult(
-                    stage,
-                    first.rows + second.rows,
-                    first.applied + second.applied,
-                    first.skipped + second.skipped
-            );
-        }
     }
 }
