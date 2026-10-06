@@ -4,5 +4,6 @@ public enum DatabaseType {
     POSTGRES,
     ORACLE,
     MSSQL,
-    SAPIQ
+    SAPIQ,
+    SAPASE
 }

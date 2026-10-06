@@ -188,6 +188,7 @@ public class MetadataRepository {
             case ORACLE -> "database_metadata_oracle";
             case MSSQL -> "database_metadata_mssql";
             case SAPIQ -> "database_metadata_sapiq";
+            case SAPASE -> "database_metadata_sapase";
         };
     }
 
@@ -198,6 +199,7 @@ public class MetadataRepository {
             case ORACLE -> "schema_metadata_oracle";
             case MSSQL -> "schema_metadata_mssql";
             case SAPIQ -> "schema_metadata_sapiq";
+            case SAPASE -> "schema_metadata_sapase";
         };
     }
 
@@ -208,6 +210,7 @@ public class MetadataRepository {
             case ORACLE -> "table_metadata_oracle";
             case MSSQL -> "table_metadata_mssql";
             case SAPIQ -> "table_metadata_sapiq";
+            case SAPASE -> "table_metadata_sapase";
         };
     }
 

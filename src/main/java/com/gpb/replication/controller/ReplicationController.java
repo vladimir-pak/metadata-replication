@@ -51,6 +51,9 @@ public class ReplicationController {
     @Value("${replication.sapiq.pipeline:HYBRID}")
     private String defaultSapiqPipeline;
 
+    @Value("${replication.sapase.pipeline:HYBRID}")
+    private String defaultSapasePipeline;
+
     @PostMapping("/replication/start")
     @Operation(summary = "Запуск репликации по наименованию сервиса")
     @SvoiApiLog(functionName = "StartReplication")
@@ -148,6 +151,15 @@ public class ReplicationController {
         if (databaseType == DatabaseType.SAPIQ) {
             ReplicationPipeline configured =
                     ReplicationPipeline.from(defaultSapiqPipeline);
+
+            return configured != null
+                    ? configured
+                    : ReplicationPipeline.HYBRID;
+        }
+
+        if (databaseType == DatabaseType.SAPASE) {
+            ReplicationPipeline configured =
+                    ReplicationPipeline.from(defaultSapasePipeline);
 
             return configured != null
                     ? configured
