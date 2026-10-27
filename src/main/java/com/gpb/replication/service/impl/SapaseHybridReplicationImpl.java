@@ -721,13 +721,23 @@ public class SapaseHybridReplicationImpl
         }
 
         try {
-            // jConnect switches the database through JDBC; no SQL identifier interpolation.
-            connection.setCatalog(databaseName);
+            if (databaseName.isBlank() || databaseName.indexOf('\0') >= 0) {
+                throw new MetadataReplicationException("Invalid SAP ASE database name");
+            }
+
+            // Avoid jConnect setCatalog(): some builds fail in Dialect.getDialectUsingCode().
+            // A database name is an SQL identifier, not a bind parameter.
+            String quotedDatabase = "[" + databaseName.replace("]", "]]") + "]";
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("USE " + quotedDatabase);
+            }
             try (Statement statement = connection.createStatement();
                  ResultSet rs = statement.executeQuery("SELECT db_name()")) {
-                if (!rs.next() || !databaseName.equals(rs.getString(1))) {
+                String actualDatabase = rs.next() ? rs.getString(1) : null;
+                if (!databaseName.equals(actualDatabase)) {
                     throw new MetadataReplicationException(
-                            "SAP ASE driver did not switch to database: " + databaseName
+                            "SAP ASE database selection mismatch: expected=" + databaseName
+                                    + ", actual=" + actualDatabase
                     );
                 }
             }
