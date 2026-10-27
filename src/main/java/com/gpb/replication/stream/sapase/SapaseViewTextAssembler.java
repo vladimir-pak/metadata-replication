@@ -1,6 +1,6 @@
 package com.gpb.replication.stream.sapase;
 
-/** Assembles ordered syscomments fragments without changing SQL whitespace. */
+/** Assembles ordered syscomments fragments, preserving whitespace and removing NULs. */
 public final class SapaseViewTextAssembler {
 
     private final StringBuilder text = new StringBuilder();
@@ -30,7 +30,9 @@ public final class SapaseViewTextAssembler {
         if (fragment == null) {
             missingText = true;
         } else {
-            text.append(fragment);
+            // Remove actual NUL characters before JSON serialization: PostgreSQL
+            // text/jsonb cannot store them. Preserve whitespace and literal escapes.
+            text.append(fragment.replace("\0", ""));
         }
     }
 

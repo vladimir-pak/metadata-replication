@@ -745,7 +745,10 @@ public class SapaseMetadataCopyStreamer {
 
             } catch (Exception e) {
                 try {
-                    copyIn.cancelCopy();
+                    // endCopy() may already have closed COPY after a server error.
+                    if (copyIn.isActive()) {
+                        copyIn.cancelCopy();
+                    }
                 } catch (SQLException cancelException) {
                     e.addSuppressed(cancelException);
                 }

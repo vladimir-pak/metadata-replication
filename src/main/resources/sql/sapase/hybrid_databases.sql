@@ -5,7 +5,7 @@ SELECT
     d.name AS DB_NAME
 FROM master.dbo.sysdatabases d
 WHERE d.name NOT IN (
-    'master', 'model', 'tempdb', 'sybsystemdb', 'sybsystemprocs',
+    'model', 'tempdb', 'sybsystemdb', 'sybsystemprocs',
     'sybsecurity', 'dbccdb', 'sybmgmtdb'
 )
   AND (isnull(d.status3, 0) & 256) = 0
