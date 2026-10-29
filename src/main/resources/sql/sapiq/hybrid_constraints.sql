@@ -21,7 +21,7 @@ JOIN SYS.SYSTAB t
 JOIN SYS.SYSUSER u
     ON u.user_id = t.creator
 WHERE t.table_type IN (1, 2, 21)
-  AND TRIM(u.user_name) NOT IN ('SYS', 'dbo', 'DBA')
+  AND TRIM(u.user_name) NOT IN ('SYS', 'DBA')
   AND i.index_category IN (1, 2, 3)
   AND (
         i.index_category IN (1, 2)

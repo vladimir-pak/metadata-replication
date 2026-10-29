@@ -7,5 +7,5 @@ JOIN SYS.SYSUSER u
 LEFT JOIN SYS.SYSSOURCE src
     ON src.object_id = t.object_id
 WHERE t.table_type IN (2, 21)
-  AND TRIM(u.user_name) NOT IN ('SYS', 'dbo', 'DBA')
+  AND TRIM(u.user_name) NOT IN ('SYS', 'DBA')
 ORDER BY t.table_id

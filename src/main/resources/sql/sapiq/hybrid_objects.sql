@@ -17,5 +17,5 @@ JOIN SYS.SYSUSER u
 LEFT JOIN SYS.SYSREMARK r
     ON r.object_id = t.object_id
 WHERE t.table_type IN (1, 2, 21)
-  AND TRIM(u.user_name) NOT IN ('SYS', 'dbo', 'DBA')
+  AND TRIM(u.user_name) NOT IN ('SYS', 'DBA')
 ORDER BY t.table_id
