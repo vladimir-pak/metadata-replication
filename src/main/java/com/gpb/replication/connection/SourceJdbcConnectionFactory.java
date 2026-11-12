@@ -74,7 +74,7 @@ public class SourceJdbcConnectionFactory {
                 );
 
                 svoiLogger.logConnectToSource(
-                    source.getPrimaryUrl(),
+                    source.getHostFromUrl(),
                     source.getPortFromUrl(),
                     source.getDbType(),
                     source.getUsername()
